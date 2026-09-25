@@ -1,0 +1,10 @@
+{
+  "name": "@codara/mock-llm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "codara-mock-llm": "./server.mjs" },
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

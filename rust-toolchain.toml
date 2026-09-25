@@ -1,0 +1,5 @@
+[toolchain]
+# Codara 硬约束：sidecar 发布产物必须用 1.77.2 编译。
+# 1.78 起 Tier 1 Windows target 要求 Win10，Win7 target 仅 Tier 3（无 CI 保障）。
+channel = "1.77.2"
+profile = "minimal"

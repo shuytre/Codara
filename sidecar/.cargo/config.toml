@@ -1,0 +1,13 @@
+# Cargo 国内镜像（crates.io sparse index + 静态资源）
+# 说明：此配置随仓库分发；若开发者可直连 crates.io，可删除本文件
+[source.crates-io]
+replace-with = 'rsproxy-sparse'
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true

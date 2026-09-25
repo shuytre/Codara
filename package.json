@@ -1,0 +1,33 @@
+{
+  "name": "codara",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Codara - conversational coding agent for Windows 7 SP1/8.1/10 x64",
+  "scripts": {
+    "build:shared": "pnpm --filter @codara/contract build",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "build:main": "pnpm --filter @codara/main build",
+    "build:renderer": "pnpm --filter @codara/renderer build",
+    "build": "pnpm build:shared && pnpm build:sidecar && pnpm build:main && pnpm build:renderer",
+    "dev": "node scripts/dev.mjs",
+    "test": "pnpm -r test",
+    "test:main": "pnpm --filter @codara/main test",
+    "test:renderer": "pnpm --filter @codara/renderer test",
+    "test:contract": "pnpm --filter @codara/contract test",
+    "test:integration": "pnpm --filter @codara/tests-integration test",
+    "test:sidecar": "cargo test --manifest-path sidecar/Cargo.toml",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=16.17"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  }
+}

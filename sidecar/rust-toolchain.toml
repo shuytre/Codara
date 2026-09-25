@@ -1,0 +1,6 @@
+# 工具链锁定（规格 5.2 MSRV 硬约束：Rust 1.77.2，Win7 Tier1 兼容上限）
+# rustup 会自动选择此版本；禁止 1.78+（std 在 Win7 上的兼容面未验证）
+[toolchain]
+channel = "1.77.2"
+profile = "minimal"
+components = ["rustfmt"]

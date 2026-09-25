@@ -1,0 +1,14 @@
+pub mod rpc;
+pub mod state;
+pub mod fsops;
+pub mod search;
+pub mod index;
+pub mod terminal;
+pub mod governance;
+pub mod gitops;
+pub mod snapshot;
+pub mod secret;
+pub mod db;
+pub mod audit;
+pub mod ckpt;
+pub mod dispatch;

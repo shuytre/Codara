@@ -1,0 +1,6 @@
+packages:
+  - shared
+  - electron
+  - renderer
+  - tests/integration
+  - tests/mock-llm

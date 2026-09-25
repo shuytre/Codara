@@ -1,0 +1,14 @@
+{
+  "name": "@codara/tests-integration",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@codara/contract": "workspace:*",
+    "@types/node": "^16.18.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

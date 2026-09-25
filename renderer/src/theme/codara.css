@@ -1,0 +1,81 @@
+/* Codara 自研扁平浅色主题（不依赖 Fluent/亚克力，规格 2.4） */
+:root {
+  --bg: #f5f6f7;
+  --bg-panel: #ffffff;
+  --bg-hover: #eef0f2;
+  --ink: #1c2b33;
+  --ink-secondary: #5f6b73;
+  --ink-tertiary: #8a959c;
+  --hairline: #dcdfe3;
+  --cobalt: #0a57c2;          /* CTA 主色 */
+  --cobalt-hover: #084aa8;
+  --ink-black: #1c2b33;       /* 激活态胶囊 */
+  --green-ok: #1a7f37;
+  --red-danger: #c62828;
+  --amber-warn: #b45309;
+  --radius: 6px;
+  --mono: 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+button {
+  font-family: inherit;
+  font-size: 13px;
+  border: 1px solid var(--hairline);
+  background: var(--bg-panel);
+  color: var(--ink);
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  cursor: pointer;
+}
+button:hover { background: var(--bg-hover); }
+button.primary {
+  background: var(--cobalt);
+  border-color: var(--cobalt);
+  color: #fff;
+  font-weight: 600;
+}
+button.primary:hover { background: var(--cobalt-hover); }
+button.danger { color: var(--red-danger); border-color: var(--red-danger); }
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: 13px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  background: var(--bg-panel);
+  color: var(--ink);
+  outline: none;
+  width: 100%;
+}
+input:focus, textarea:focus { border-color: var(--cobalt); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #c9cdd2; border-radius: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- M3 角色树 / M4 恢复与预授权 ---- */
+.st-badge { margin-left: auto; font-size: 10px; padding: 1px 6px; border-radius: 8px; background: #eceff1; color: #546e7a; }
+.st-running .st-badge { background: #e3f2fd; color: #1565c0; }
+.st-wait .st-badge { background: #fff8e1; color: #b26a00; }
+.st-done .st-badge { background: #e8f5e9; color: #2e7d32; }
+.st-failed .st-badge { background: #fdecea; color: #c62828; }
+.tree-node { display: flex; align-items: center; gap: 6px; }
+.tree-node.child { padding-left: 14px; font-size: 12px; color: #455a64; }
+.crew-task { display: flex; flex-direction: column; gap: 2px; }
+.goal-precheck { border: 1px solid #e0e3e5; border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; background: #fafbfc; display: flex; flex-direction: column; gap: 6px; }
+.recovery-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 8px; border: 1px solid #ffe0b2; background: #fff8e1; border-radius: 10px; font-size: 13px; }
