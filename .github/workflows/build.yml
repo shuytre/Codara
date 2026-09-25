@@ -118,3 +118,37 @@ jobs:
         with:
           name: codara-installers
           path: installer/dist/*.exe
+
+      - name: 组装便携完整包（Electron 运行时 + 应用 + sidecar）
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $stage = "$env:RUNNER_TEMP\portable\Codara"
+          New-Item -ItemType Directory -Force -Path "$stage\resources\app\dist", "$stage\resources\bin\x86_64-pc-windows-msvc" | Out-Null
+          # Electron 22.3.27：最后一个支持 Win7/8/8.1 的版本
+          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/electron/electron/releases/download/v22.3.27/electron-v22.3.27-win32-x64.zip" -OutFile "$env:RUNNER_TEMP\electron.zip"
+          Expand-Archive "$env:RUNNER_TEMP\electron.zip" $stage -Force
+          Rename-Item "$stage\electron.exe" "Codara.exe"
+          # 主进程 app（esbuild 自包含 bundle，main -> dist/main.js）
+          Copy-Item electron\dist\* "$stage\resources\app\dist\" -Force
+          @'
+          {
+            "name": "codara",
+            "productName": "Codara",
+            "version": "0.1.0",
+            "main": "dist/main.js"
+          }
+          '@ | Set-Content -Encoding utf8 "$stage\resources\app\package.json"
+          # renderer（main.ts 按 app/dist/../../renderer/dist 解析）
+          Copy-Item renderer\dist "$stage\resources\renderer" -Recurse -Force
+          # sidecar（manager.ts 按 process.resourcesPath/bin/<triple>/ 解析）
+          Copy-Item resources\bin\x86_64-pc-windows-msvc\codara-sidecar.exe "$stage\resources\bin\x86_64-pc-windows-msvc\" -Force
+          Compress-Archive -Path "$stage\*" -DestinationPath "$env:RUNNER_TEMP\Codara-portable-win7-x64.zip" -Force
+          Write-Host "portable zip bytes:" (Get-Item "$env:RUNNER_TEMP\Codara-portable-win7-x64.zip").Length
+
+      - name: 上传产物 - 便携完整包
+        uses: actions/upload-artifact@v4
+        with:
+          name: codara-portable-win7-x64
+          path: ${{ runner.temp }}/Codara-portable-win7-x64.zip
+          if-no-files-found: error
