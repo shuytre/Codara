@@ -40,6 +40,24 @@ jobs:
       - name: 安装 NSIS
         run: choco install nsis -y --no-progress
 
+      - name: 将 NSIS 加入 PATH（choco 装完后当前 job 的 PATH 快照不刷新）
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "C:\Program Files (x86)\NSIS",
+            "C:\Program Files\NSIS",
+            "$env:ProgramData\chocolatey\lib\nsis\tools\NSIS",
+            "$env:ProgramData\chocolatey\bin"
+          )
+          $found = $candidates | Where-Object { Test-Path (Join-Path $_ "makensis.exe") } | Select-Object -First 1
+          if ($found) {
+            Add-Content $env:GITHUB_PATH $found
+            Write-Host "makensis found at: $found"
+          } else {
+            Write-Host "::warning::makensis.exe not found in candidate dirs"
+            Get-ChildItem "C:\Program Files (x86)", "C:\Program Files", "$env:ProgramData\chocolatey\lib" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "nsis" } | ForEach-Object { Write-Host "NSIS-like dir: $($_.FullName)" }
+          }
+
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
