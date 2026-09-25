@@ -238,6 +238,23 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     return true;
   });
 
+  // 新建对话：切换新会话（原会话消息仍在 sidecar 中），清空 AgentLoop 工作记忆
+  ipcMain.handle(IPC.chatNew, async (): Promise<boolean> => {
+    deps.loop.abort();
+    gateway.setGoalPreAuthorized(false);
+    deps.loop.reset();
+    try {
+      const sess = await sidecar.call('session.create', { kind: 'main', title: `对话 ${new Date().toLocaleString('zh-CN')}` });
+      const data = sess.data as { sessionId?: string } | undefined;
+      if (sess.ok && data?.sessionId) {
+        deps.loop.attachMainSession(String(data.sessionId));
+      }
+    } catch (err) {
+      logger.warn('new chat session create failed', err);
+    }
+    return true;
+  });
+
   // ---------- Goal 预授权（M4，规格 4.7） ----------
   ipcMain.handle(IPC.goalPreauthorize, async (_e, payload: unknown): Promise<boolean> => {
     const p = GoalPreauthorizeSchema.parse(payload);

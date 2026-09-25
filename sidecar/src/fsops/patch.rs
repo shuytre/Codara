@@ -105,6 +105,10 @@ pub fn fs_patch(state: &mut AppState, params: Value) -> Envelope {
     };
 
     // 逐个 edit 应用
+    // 新建文件（!exists）时内容已在上方由 newText 顺序拼接完成，
+    // 此时 edits 通常只含 newText、不含锚点，必须跳过校验循环，否则误报
+    // "edit must contain oldText|insertAfter|insertBefore"。
+    if exists {
     for edit in &edits {
         if let Some(old) = edit.get("oldText").and_then(|v| v.as_str()) {
             let new = edit.get("newText").and_then(|v| v.as_str()).unwrap_or("");
@@ -176,6 +180,7 @@ pub fn fs_patch(state: &mut AppState, params: Value) -> Envelope {
         } else {
             return Envelope::err(error::INVALID_PARAMS, "edit must contain oldText|insertAfter|insertBefore");
         }
+    }
     }
 
     // 组装输出：保真换行 + 末尾换行 + 编码

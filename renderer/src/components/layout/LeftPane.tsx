@@ -2,7 +2,7 @@
 import { createSignal, For, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
-import { crew, setSettings, setUi, settings, ui } from '../../state/stores';
+import { cards, chat, crew, setCards, setChat, setSettings, setUi, settings, ui } from '../../state/stores';
 
 const ROLE_LABEL: Record<string, string> = {
   coordinator: '调度主控',
@@ -24,7 +24,7 @@ const STATUS_CLASS: Record<string, string> = {
   FAILED: 'st-failed',
 };
 
-export function LeftPane() {
+export function LeftPane(props: { onOpenSettings: () => void }) {
   const b = bridge();
   const [busy, setBusy] = createSignal(false);
 
@@ -42,6 +42,13 @@ export function LeftPane() {
     }
   };
 
+  // 新建对话：主进程建新会话并重置 AgentLoop，渲染层清空本栏
+  const newChat = async () => {
+    await b.chatNew();
+    setChat({ entries: [], liveId: null, streaming: false, streamText: '' });
+    setCards('list', []);
+  };
+
   return (
     <aside class="left-pane">
       <div class="pane-title">工作区</div>
@@ -54,7 +61,12 @@ export function LeftPane() {
         </button>
       </div>
 
-      <div class="pane-title">任务树</div>
+      <div class="pane-title">
+        任务树
+        <button class="icon-btn" title="新建对话" onClick={newChat}>
+          <IconPlus />
+        </button>
+      </div>
       <div class="task-tree">
         <div class="tree-node active">主对话</div>
         <Show when={crew.tasks.length > 0} fallback={<div class="tree-hint">专家会话（任务创建后显示）</div>}>
@@ -88,6 +100,53 @@ export function LeftPane() {
         />
         显示右栏
       </label>
+
+      <div class="left-pane-foot">
+        <button class="foot-btn" title="设置" onClick={props.onOpenSettings}>
+          <IconSettings />
+          <span>设置</span>
+        </button>
+      </div>
     </aside>
+  );
+}
+
+/** lucide: plus */
+function IconPlus() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M5 12h14" />
+      <path d="M12 5v14" />
+    </svg>
+  );
+}
+
+/** lucide: settings */
+function IconSettings() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
   );
 }

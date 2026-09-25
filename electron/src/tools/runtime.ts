@@ -66,40 +66,45 @@ export class ToolRuntime {
       },
       {
         name: 'write',
-        description: '补丁式写入（唯一写通道）。edits 数组：oldText/newText 精确替换或 insertAfter/insertBefore 锚点插入。新建文件必须 create=true。写入前基线哈希校验。',
+        description:
+          '补丁式写入（唯一写通道）。必须同时给出 path 与 edits 数组：edits 每项用 oldText/newText 精确替换，或用 insertAfter/insertBefore 锚点插入。新建文件必须 create=true（此时 edits 的 newText 按顺序拼成完整文件内容，不得含 oldText）。修改已有文件必须 create=false 且先用 read 拿到 baselineHash 传入。',
         parameters: {
           type: 'object',
           properties: {
-            path: { type: 'string' },
+            path: {
+              type: 'string',
+              description: '必填。目标文件路径，相对工作区根（如 index.html）或绝对路径。缺失将直接报错。',
+            },
             edits: {
               type: 'array',
+              description: '必填。编辑项数组，至少一项。',
               items: {
                 type: 'object',
                 properties: {
-                  oldText: { type: 'string' },
-                  newText: { type: 'string' },
-                  insertAfter: { type: 'string' },
-                  insertBefore: { type: 'string' },
+                  oldText: { type: 'string', description: '被替换的原文（必须与文件内容逐字一致）' },
+                  newText: { type: 'string', description: '替换后的新文本；新建文件时此字段按顺序拼接' },
+                  insertAfter: { type: 'string', description: '在此锚点文本之后插入 newText' },
+                  insertBefore: { type: 'string', description: '在此锚点文本之前插入 newText' },
                 },
               },
             },
-            create: { type: 'boolean', description: '新建文件必须 true' },
-            baselineHash: { type: 'string', description: '最近一次 read 返回的 baselineHash' },
+            create: { type: 'boolean', description: '新建文件必须 true；修改已有文件必须 false 或省略' },
+            baselineHash: { type: 'string', description: '最近一次 read 返回的 baselineHash（修改已有文件时必填）' },
           },
           required: ['path', 'edits'],
         },
       },
       {
         name: 'terminal',
-        description: '终端执行（持久会话）。单条命令；禁止 && / ; 长链；管道仅限简单 findstr。默认 cmd.exe。超时默认 30s 上限 300s。',
+        description: '终端执行（持久会话）。必须给出 command；单条命令；禁止 && / ; 长链；管道仅限简单 findstr。默认 cmd.exe。超时默认 30s 上限 300s。',
         parameters: {
           type: 'object',
           properties: {
-            command: { type: 'string' },
-            cwd: { type: 'string' },
-            timeoutMs: { type: 'number' },
-            input: { type: 'string' },
-            sessionId: { type: 'string' },
+            command: { type: 'string', description: '必填。单条命令行，如 dir 或 npm test。' },
+            cwd: { type: 'string', description: '工作目录（相对工作区根），默认工作区根' },
+            timeoutMs: { type: 'number', description: '超时毫秒，默认 30000，上限 300000' },
+            input: { type: 'string', description: '标准输入内容（交互式命令用）' },
+            sessionId: { type: 'string', description: '复用终端会话 id；省略则自动建立' },
           },
           required: ['command'],
         },
@@ -302,13 +307,32 @@ export class ToolRuntime {
         break;
       }
       case 'write': {
-        const p = params as WriteParams;
-        // 写前预快照（fs.patch 成功后 sidecar 不自动快照，主进程编排）
-        const target = (p as { path?: string }).path;
-        if (target) {
-          await this.sidecar.call('snap.create', { paths: [target], label: 'pre-patch', taskId: 'adhoc' }).catch(() => undefined);
+        // 参数归一化：吸收各厂商异构 edits 形态（字符串化 JSON、行区间等）→ sidecar 契约
+        const norm = normalizeWriteParams(params);
+        if (!norm) {
+          const got = params && typeof params === 'object' ? Object.keys(params as object).join(', ') : typeof params;
+          return {
+            ok: false,
+            error: {
+              code: 1007,
+              message:
+                `write 参数无法解析：缺少 path 或 edits。你提供的参数键：[${got}]。` +
+                '请重新调用 write，形如 {"path":"snake.html","create":true,"edits":[{"newText":"...文件全文..."}]}。',
+            },
+            tool,
+            params: summarize(params),
+            durationMs: Date.now() - started,
+          };
         }
-        env = await this.sidecar.call('fs.patch', p);
+        // 写前预快照（fs.patch 成功后 sidecar 不自动快照，主进程编排）
+        await this.sidecar.call('snap.create', { paths: [norm.path], label: 'pre-patch', taskId: 'adhoc' }).catch(() => undefined);
+        env = await this.sidecar.call('fs.patch', norm);
+        // 自愈：模型常带过期 baselineHash（或先 create 后又带 hash），
+        // 去掉 hash 重试一次；仍失败才把错误回注模型。
+        if (!env.ok && norm.baselineHash) {
+          const { baselineHash: _drop, ...retry } = norm;
+          env = await this.sidecar.call('fs.patch', retry as WriteParams);
+        }
         break;
       }
       case 'terminal': {
@@ -381,6 +405,115 @@ export class ToolRuntime {
 function isWriteOp(params: unknown): boolean {
   const op = (params as GitParams)?.op;
   return ['commit', 'branch-create', 'worktree-create', 'worktree-remove', 'revert'].includes(op || '');
+}
+
+/**
+ * write 参数归一化：不同厂商模型会产出异构 edits 结构，统一收敛到 sidecar 契约
+ * （{path, create, baselineHash, edits:[{oldText,newText}|{insertAfter,newText}|{insertBefore,newText}]}）。
+ * 已知异构形态：
+ *  - edits 被序列化成 JSON 字符串（Agnes 等）
+ *  - edits 项用 startLine/endLine/contentLines（Agnes 行区间形态）
+ *  - edits 项用 lines/line/content（其他形态）
+ *  - 文本字段嵌在 edit.text / edit.content
+ * 归一化失败时返回 null，由调用方给出可自纠的错误信息。
+ */
+export function normalizeWriteParams(raw: unknown): WriteParams | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const p = raw as Record<string, unknown>;
+
+  // path 必填（缺失直接判定失败，避免产出 "undefined" 路径）
+  const path = typeof p.path === 'string' ? p.path.trim() : '';
+  if (!path) return null;
+
+  let editsRaw: unknown = p.edits;
+  if (typeof editsRaw === 'string') {
+    try {
+      editsRaw = JSON.parse(editsRaw);
+    } catch {
+      // 字符串但不是 JSON：当作单条 newText 整文件内容
+      editsRaw = [{ newText: editsRaw }];
+    }
+  }
+  if (!Array.isArray(editsRaw) || editsRaw.length === 0) return null;
+
+  const edits: Array<Record<string, string>> = [];
+  for (const item of editsRaw) {
+    if (typeof item === 'string') {
+      if (item.length > 0) edits.push({ newText: item });
+      continue;
+    }
+    if (!item || typeof item !== 'object') continue;
+    const e = item as Record<string, unknown>;
+
+    const oldText = firstString(e, ['oldText', 'old_text', 'old', 'search', 'find']);
+    const newText = firstString(e, ['newText', 'new_text', 'new', 'replace', 'content', 'text']);
+    const insertAfter = firstString(e, ['insertAfter', 'insert_after', 'after']);
+    const insertBefore = firstString(e, ['insertBefore', 'insert_before', 'before']);
+
+    // 锚点插入优先（无 oldText 时）
+    if (!oldText && insertAfter) {
+      edits.push({ insertAfter, newText: newText ?? '' });
+      continue;
+    }
+    if (!oldText && insertBefore) {
+      edits.push({ insertBefore, newText: newText ?? '' });
+      continue;
+    }
+    if (oldText) {
+      // 有 oldText：精确替换（sidecar 依赖此分支定位）
+      edits.push({ oldText, newText: newText ?? '' });
+      continue;
+    }
+    if (newText !== undefined) {
+      // 只有 newText：新建文件内容（走 create 拼接分支）
+      edits.push({ newText });
+      continue;
+    }
+
+    // 行区间形态：startLine/endLine + contentLines（或 lines 数组）
+    const lines = toStringArray(e['contentLines']) ?? toStringArray(e['lines']);
+    if (lines) {
+      const oldLines = toStringArray(e['oldLines']);
+      if (oldLines) {
+        edits.push({ oldText: oldLines.join('\n'), newText: lines.join('\n') });
+        continue;
+      }
+      // 无原文 → 只能整文件拼接（仅 create 场景安全）
+      edits.push({ __append: '1', newText: lines.join('\n') });
+    }
+  }
+
+  if (edits.length === 0) return null;
+
+  // 存在 __append（行区间无原文）时：退化为整文件覆盖（仅新建/全量重写安全）
+  const hasAppend = edits.some((e) => e['__append'] === '1');
+  const finalEdits = hasAppend
+    ? [{ newText: edits.map((e) => e.newText ?? '').join('\n') }]
+    : edits;
+
+  const create = typeof p.create === 'boolean' ? p.create : undefined;
+  const baselineHash = firstString(p, ['baselineHash', 'baseline_hash']);
+
+  return {
+    path,
+    edits: finalEdits as unknown as WriteParams['edits'],
+    create: hasAppend ? true : create,
+    baselineHash,
+  } as WriteParams;
+}
+
+function firstString(o: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return undefined;
+}
+
+function toStringArray(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  if (v.every((x) => typeof x === 'string')) return v as string[];
+  return undefined;
 }
 
 /** 角色工具矩阵（M3）：唯一来源 crew/roles.ts ROLE_DEFS */

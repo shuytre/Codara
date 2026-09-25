@@ -2,7 +2,6 @@
 import { createStore, produce } from 'solid-js/store';
 
 import type { Card, ChatEntry, SettingsPayload, UsageSnapshot } from '@codara/contract';
-
 export const [chat, setChat] = createStore({
   entries: [] as ChatEntry[],
   streaming: false,
@@ -32,7 +31,49 @@ export const [ui, setUi] = createStore({
   rightPaneVisible: true,
   budgetDialogOpen: false,
   settingsOpen: false,
+  /** 待处理审批队列：模型可能并行发起多个 ask 级工具，必须排队而非覆盖 */
+  pendingApprovals: [] as import('@codara/contract').ApprovalCard[],
 });
+
+/** 队首审批卡（渲染为阻塞横幅）；队列为空返回 null */
+export function headApproval(): import('@codara/contract').ApprovalCard | null {
+  return ui.pendingApprovals[0] ?? null;
+}
+
+/** 入队待审批卡（同 token 幂等，避免重复 push 造成堆叠） */
+export function setApprovalCard(card: import('@codara/contract').ApprovalCard | null): void {
+  if (!card) {
+    setUi('pendingApprovals', []);
+    return;
+  }
+  setUi('pendingApprovals', produce((q: import('@codara/contract').ApprovalCard[]) => {
+    if (!q.some((c) => c.approvalToken === card.approvalToken)) q.push(card);
+  }));
+}
+
+/**
+ * 裁决审批卡：三处引用必须同步，否则会残留「待审批」横幅。
+ *  - cards.list（右栏审批队列）
+ *  - ui.pendingApprovals（阻塞横幅队列）
+ *  - chat.entries[].cards（聊天流内嵌卡片，由 attachCardToLive 写入）
+ * 已裁决的卡保留在 cards.list 供审计追溯。
+ */
+export function resolveApprovalCard(token: string, approved: boolean): void {
+  const next = (approved ? 'approved' : 'rejected') as Card['status'];
+  setCards('list', produce((list: Card[]) => {
+    const idx = list.findIndex((c) => c.type === 'approval' && (c as { approvalToken?: string }).approvalToken === token);
+    if (idx >= 0) list[idx] = { ...list[idx]!, status: next } as Card;
+  }));
+  setUi('pendingApprovals', (q) => q.filter((c) => c.approvalToken !== token));
+  setChat('entries', produce((entries: ChatEntry[]) => {
+    for (const e of entries) {
+      const list = e.cards;
+      if (!list) continue;
+      const idx = list.findIndex((c) => c.type === 'approval' && (c as { approvalToken?: string }).approvalToken === token);
+      if (idx >= 0) list[idx] = { ...list[idx]!, status: next } as Card;
+    }
+  }));
+}
 
 export function appendEntry(e: ChatEntry): void {
   setChat('entries', (prev) => [...prev, e]);
@@ -64,24 +105,24 @@ export function ensureLiveEntry(): string {
 export function appendDeltaToLive(text: string): void {
   if (!text) return;
   const id = ensureLiveEntry();
-  setChat('entries', (e) => e.id === id, 'text', (t) => t + text);
+  setChat('entries', (e) => e.id === id, produce((e: ChatEntry) => {
+    e.text = (e.text ?? '') + text;
+  }));
 }
 
 /** 卡片 upsert 到 live 条目（同 id 覆盖：running → done/failed 状态更新实时可见） */
 export function attachCardToLive(card: Card): void {
   upsertCard(card);
   const id = ensureLiveEntry();
-  setChat('entries', (entries) => {
-    const idx = entries.findIndex((e) => e.id === id);
-    if (idx < 0) return entries;
-    const e = entries[idx]!;
-    const list = e.cards ?? [];
-    const ci = list.findIndex((c) => c.id === card.id);
-    const next = ci >= 0 ? list.map((c) => (c.id === card.id ? card : c)) : [...list, card];
-    const updated = [...entries];
-    updated[idx] = { ...e, cards: next };
-    return updated;
-  });
+  setChat('entries', (e) => e.id === id, produce((e: ChatEntry) => {
+    e.cards = e.cards ?? [];
+    const ci = e.cards.findIndex((c) => c.id === card.id);
+    if (ci >= 0) {
+      e.cards[ci] = card;
+    } else {
+      e.cards.push(card);
+    }
+  }));
 }
 
 /** 收尾本轮 live 条目：写入最终文本与元信息，解除 live 标记 */
@@ -98,10 +139,11 @@ export function finalizeLiveEntry(
     }
     return;
   }
-  setChat('entries', (e) => e.id === id, (e) => ({
-    ...e,
-    text: finalText !== undefined && finalText !== '' ? finalText : e.text,
-    ...meta,
+  setChat('entries', (e) => e.id === id, produce((e: ChatEntry) => {
+    if (finalText !== undefined && finalText !== '') e.text = finalText;
+    if (meta?.model) e.model = meta.model;
+    if (meta?.effort) e.effort = meta.effort;
+    if (meta?.usage) e.usage = meta.usage;
   }));
 }
 

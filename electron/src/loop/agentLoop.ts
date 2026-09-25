@@ -267,10 +267,14 @@ export class AgentLoop {
         });
 
         // 工具结果回注模型（截断保护：工具输出最长 8000 字符）
+        // 失败时把 error.message 提到顶层，模型更容易直接读到该做什么
+        const payload: Record<string, unknown> = r.ok
+          ? { ok: true, data: r.data, truncated: r.truncated, cacheRef: r.cacheRef }
+          : { ok: false, error: r.error?.message ?? 'unknown error', code: r.error?.code };
         const toolMsg: ChatMessage = {
           role: 'tool',
           tool_call_id: tc.id,
-          content: JSON.stringify({ ok: r.ok, data: r.data, error: r.error, truncated: r.truncated, cacheRef: r.cacheRef }).slice(0, 8000),
+          content: JSON.stringify(payload).slice(0, 8000),
         };
         this.messages.push(toolMsg);
         void this.persist(crew, toolMsg);
@@ -330,7 +334,14 @@ function buildSystemPrompt(mode: TaskMode, toolNames: string[]): string {
 9. 证据纪律：一切结论以退出码、文件:行号、真实输出为准。禁止编造工具输出。
 10. 长会话纪律：不重复读取已读内容；重复读返回缓存引用。
 
-工具返回统一信封 {ok, data, error, truncated, cacheRef}。write 为唯一写通道，编辑用 oldText/newText 精确替换；新建文件必须 create=true；写入前用 read 拿 baselineHash。`;
+工具返回统一信封 {ok, data, error, truncated, cacheRef}。write 为唯一写通道：**path 与 edits 都是必填**，缺任一即失败。编辑用 oldText/newText 精确替换；新建文件必须 create=true（此时只用 newText 拼接内容，不要给 oldText）；修改已有文件必须 create=false 并传入 read 得到的 baselineHash。
+
+工具参数纪律（违反会直接失败，且系统会原样返回你的参数键名）：
+- 调用前自查必填参数：write 必须同时给 **path** 与 **edits**；terminal 必须给 command；read/search 必须给 path/pattern。
+- write 正确示例：{"path":"snake.html","create":true,"edits":[{"newText":"<!DOCTYPE html>..."}]}
+- write 错误示例：{"create":true,"edits":[...]}  ← 缺 path，会被拒绝
+- 收到 INVALID_PARAMS 或「缺少必填参数」时，**禁止原样重发**：补齐缺失字段后再调用。
+- 工具失败不会终止会话，错误信封会回注给你；据此修正参数重试，或换一条路径，或如实向用户说明卡点。`;
 
   if (mode === 'ask') {
     return base + '\n\n当前任务模式：Ask。只回答问题，不要调用写类工具。';

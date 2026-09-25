@@ -3,11 +3,22 @@
 > 适用：zip 包 `codara-source-m1-m7.zip`（M1–M7 全部源码，可直接构建编译）。
 > 构建宿主：Linux x64 / Windows x64 / macOS 均可（**运行目标平台为 Windows 7 SP1+**，Linux 上可跑全部测试）。
 
+## 0. 构建机 ≠ 运行目标机（重要）
+
+**下表的 Node/pnpm/Rust/NSIS 只需装在构建机上**（开发者的 Win10/11 或 CI Linux）。
+**Win7 最终用户不装任何构建环境**——离线安装包已自带全部运行时：
+
+| Win7 目标机随包分发 | 版本（锁定） | 说明 |
+|---|---|---|
+| Electron | **22.3.27** | 最后一个支持 Win7/8/8.1 的 Electron（Chromium 108 + 内嵌 Node 16.17.1） |
+| sidecar | Rust 1.77.2 产物 | 1.78+ 的 std 要求 Win10，Win7 掉 Tier3，故锁 1.77.2 |
+| MinGit / 字体 / KB 引导 | 2.46.2 x64 等 | 离线包 ≤180MB 自包含，零依赖安装 |
+
 ## 1. 环境要求（精确版本）
 
 | 组件 | 版本 | 用途 | 获取方式 |
 |---|---|---|---|
-| **Node.js** | **22.13.x**（≥16.17 可用，22.x 已验证） | JS 工具链 / electron 依赖 | https://nodejs.org（或 nvm install 22） |
+| **Node.js** | **22.13.x 已验证**（≥16.17 可用；**仅限构建机**，Win7 目标机不装） | JS 工具链 / electron 依赖 | https://nodejs.org（或 nvm install 22） |
 | **pnpm** | **9.x**（≥8 可用） | 包管理（workspace 协议） | `corepack enable && corepack prepare pnpm@9 --activate` 或 `npm i -g pnpm@9` |
 | Rust | **1.77.2（MSRV 硬约束）** | sidecar 编译 | `rustup toolchain install 1.77.2`；`sidecar/rust-toolchain.toml` 会自动选中；**禁止 1.78+ 作为发布目标**（Win7 兼容面未验证） |
 | **cargo** | 随 rustup 1.77.2 | Rust 构建/测试 | 同上 |

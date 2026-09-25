@@ -2,7 +2,7 @@
 import { createEffect, createResource, createSignal, onCleanup, Show } from 'solid-js';
 
 import { bridge } from './ipc/client';
-import { setCrew, settings, setSettings, setUi, appendEntry, setChat, attachCardToLive, appendDeltaToLive, finalizeLiveEntry, setUsage } from './state/stores';
+import { setCrew, settings, setSettings, setUi, appendEntry, setChat, attachCardToLive, appendDeltaToLive, finalizeLiveEntry, setApprovalCard, setUsage } from './state/stores';
 import { MainLayout } from './components/layout/MainLayout';
 import { FirstRunWizard } from './components/wizard/FirstRunWizard';
 
@@ -31,6 +31,12 @@ export function App() {
     const offBudget = b.onBudgetSuspended((payload) => {
       setUsage(payload as never);
     });
+    // 审批卡（规格 6.1）：write/terminal/git 写操作需人工批准；
+    // 必须渲染到对话流，否则 gateway.check() 永久挂起、工具卡停在「执行中」
+    const offApproval = b.onApprovalRequest((payload) => {
+      attachCardToLive(payload.card);
+      setApprovalCard(payload.card);
+    });
     // M3：专家团事件 → 左栏角色树
     const offInst = b.onCrewInstance((payload) => {
       const v = payload as import('@codara/contract').CrewInstanceView;
@@ -54,6 +60,7 @@ export function App() {
     onCleanup(() => {
       offChat();
       offBudget();
+      offApproval();
       offInst();
       offTask();
     });

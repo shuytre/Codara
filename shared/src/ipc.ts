@@ -13,6 +13,7 @@ export const IPC = {
   // 对话
   chatSend: 'chat:send', // renderer → main：用户消息
   chatAbort: 'chat:abort',
+  chatNew: 'chat:new', // 新建对话（新会话 + 清空工作记忆）
   chatEvent: 'chat:event', // main → renderer：流式事件/卡片（sendToView）
   // 审批
   approvalRespond: 'approval:respond',

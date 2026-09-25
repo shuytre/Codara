@@ -18,6 +18,7 @@ const api = {
   modelsList: (payload: ModelsListPayload) => ipcRenderer.invoke(IPC.modelsList, payload),
   chatSend: (payload: ChatSendPayload) => ipcRenderer.invoke(IPC.chatSend, payload),
   chatAbort: () => ipcRenderer.invoke(IPC.chatAbort),
+  chatNew: () => ipcRenderer.invoke(IPC.chatNew),
   approvalRespond: (payload: { approvalToken: string; approved: boolean }) =>
     ipcRenderer.invoke(IPC.approvalRespond, payload),
   usageSnapshot: () => ipcRenderer.invoke(IPC.usageSnapshot),

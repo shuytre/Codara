@@ -13,7 +13,7 @@
   --green-ok: #1a7f37;
   --red-danger: #c62828;
   --amber-warn: #b45309;
-  --radius: 6px;
+  --radius: 8px;
   --mono: 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
 }
 
@@ -79,3 +79,67 @@ input:focus, textarea:focus { border-color: var(--cobalt); }
 .crew-task { display: flex; flex-direction: column; gap: 2px; }
 .goal-precheck { border: 1px solid #e0e3e5; border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; background: #fafbfc; display: flex; flex-direction: column; gap: 6px; }
 .recovery-banner { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 8px; border: 1px solid #ffe0b2; background: #fff8e1; border-radius: 10px; font-size: 13px; }
+
+/* ---- 圆角加大：卡片与气泡不再方正 ---- */
+.card { border-radius: 12px; }
+.card-head { border-radius: 12px 12px 0 0; }
+.entry-assistant { border-radius: 14px 14px 14px 4px; }
+.entry-user { border-radius: 14px 14px 4px 14px; }
+pre.card-body { border-radius: 0 0 6px 6px; }
+.card-body { border-radius: 0 0 12px 12px; }
+details > summary { cursor: pointer; padding: 6px 12px; font-size: 12px; color: var(--ink-secondary); border-top: 1px solid var(--hairline); }
+details > summary:hover { background: var(--bg-hover); }
+details[open] > summary { border-bottom: 1px solid var(--hairline); }
+details > pre.card-body { border-radius: 0 0 12px 12px; }
+
+/* ---- 左栏：小节标题内嵌图标按钮 + 底部设置 ---- */
+.left-pane { display: flex; flex-direction: column; }
+.pane-title { display: flex; align-items: center; gap: 6px; }
+.pane-title .icon-btn {
+  margin-left: auto; padding: 2px 4px; line-height: 0;
+  border: 1px solid transparent; background: transparent; color: var(--ink-tertiary); border-radius: 6px;
+}
+.pane-title .icon-btn:hover { background: var(--bg-hover); color: var(--cobalt); border-color: var(--hairline); }
+.left-pane-foot { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--hairline); }
+.foot-btn {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 10px; font-size: 13px; color: var(--ink-secondary);
+  border: 1px solid transparent; background: transparent; border-radius: 8px;
+}
+.foot-btn:hover { background: var(--bg-hover); color: var(--cobalt); }
+.foot-btn svg { flex: none; }
+
+/* ---- 发送/终止：图标圆钮 ---- */
+.send-btn {
+  display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
+  border-radius: 10px;
+}
+.send-btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---- 阻塞式审批横幅（write/terminal/git 写操作） ---- */
+.approval-banner {
+  max-width: 860px; margin: 4px 0 18px;
+  border: 1px solid var(--amber-warn); background: #fffaf0;
+  border-radius: 12px; padding: 12px 14px;
+}
+.approval-banner.risk-high { border-color: var(--red-danger); background: #fff5f5; }
+.ab-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.ab-tag {
+  font-size: 11px; font-weight: 700; color: #fff; background: var(--amber-warn);
+  padding: 2px 8px; border-radius: 999px; flex: none;
+}
+.approval-banner.risk-high .ab-tag { background: var(--red-danger); }
+.ab-title { font-weight: 600; font-size: 13px; }
+.ab-queue {
+  font-size: 11px; color: var(--cobalt); background: var(--cobalt-ghost);
+  border-radius: 999px; padding: 1px 8px; font-weight: 600;
+}
+.ab-risk { margin-left: auto; font-size: 11px; color: var(--amber-warn); }
+.ab-risk.risk-high { color: var(--red-danger); }
+.ab-reason { font-size: 13px; color: var(--ink-secondary); }
+.ab-payload {
+  font-family: var(--mono); font-size: 11px; background: var(--bg-panel);
+  border: 1px solid var(--hairline); border-radius: 8px; padding: 8px 10px;
+  margin: 8px 0; max-height: 140px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+}
+.ab-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }

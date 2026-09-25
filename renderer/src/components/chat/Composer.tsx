@@ -170,17 +170,53 @@ export function Composer() {
           <Show
             when={!sending()}
             fallback={
-              <button class="danger" onClick={abort}>
-                终止
+              <button class="send-btn danger" onClick={abort} title="终止">
+                <IconStop />
               </button>
             }
           >
-            <button class="primary" onClick={send} disabled={!text().trim()}>
-              发送
+            <button class="send-btn primary" onClick={send} disabled={!text().trim()} title="发送（Ctrl+Enter）">
+              <IconArrowUp />
             </button>
           </Show>
         </div>
       </div>
     </div>
+  );
+}
+
+/** lucide: arrow-up */
+function IconArrowUp() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="m5 12 7-7 7 7" />
+      <path d="M12 19V5" />
+    </svg>
+  );
+}
+
+/** lucide: square（终止） */
+function IconStop() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="none"
+    >
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
   );
 }

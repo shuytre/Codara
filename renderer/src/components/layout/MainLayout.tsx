@@ -16,13 +16,9 @@ export function MainLayout() {
       <header class="titlebar">
         <span class="logo">Codara</span>
         <span class="mode-hint">对话即全部 · 计划 / 审批 / 终端 / diff 都在对话流中</span>
-        <span style="flex:1" />
-        <button class="small" onClick={() => setSettingsOpen(true)}>
-          设置
-        </button>
       </header>
       <div class="columns">
-        <LeftPane />
+        <LeftPane onOpenSettings={() => setSettingsOpen(true)} />
         <main class="center-pane">
           <RecoveryBanner />
           <ConversationStream />

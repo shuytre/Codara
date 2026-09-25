@@ -37,7 +37,7 @@ const DEFAULTS: SettingsShape = {
     model: '',
     effort: 'balanced',
     contextLength: 128000,
-    timeoutMs: 120000,
+    timeoutMs: 300000,
     maxRetries: 3,
     stripUnknown: false,
     pricing: { promptPerM: 2, completionPerM: 8 },
@@ -64,13 +64,18 @@ export class SettingsStore {
   private load(): SettingsShape {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf-8'));
-      return {
+      const merged: SettingsShape = {
         ...DEFAULTS,
         ...raw,
         provider: { ...DEFAULTS.provider, ...(raw.provider || {}) },
         budget: { ...DEFAULTS.budget, ...(raw.budget || {}) },
         ui: { ...DEFAULTS.ui, ...(raw.ui || {}) },
       };
+      // 迁移：早期版本 120s 超时对慢速厂商（Agnes 长文生成）不足，统一抬到 300s
+      if (merged.provider.timeoutMs === 120000) {
+        merged.provider.timeoutMs = 300000;
+      }
+      return merged;
     } catch {
       return JSON.parse(JSON.stringify(DEFAULTS));
     }

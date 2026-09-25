@@ -1,0 +1,137 @@
+# Codara — GitHub Actions CI（按 DeepSeek 对话教程结构生成：checkout → 装依赖 → 编译 → 测试 → 上传产物）
+# 放置路径：.github/workflows/ci.yml
+# 触发：push 到 main / 网页手动触发（workflow_dispatch）
+# 免费额度：公开仓库 Actions 不限时长；私有仓库每月 2,000 分钟
+#
+# 产物下载：仓库 → Actions → 选一次运行 → 页面底部 Artifacts 区域
+
+name: Build Codara
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # 允许在 Actions 页面手动点击触发
+
+jobs:
+  # ---------- Job 1：Linux 全量验证（typecheck + Rust 单测 + 141 个测试） ----------
+  test:
+    name: Test (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm 9
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+          cache: 'pnpm'
+
+      - name: Setup Rust 1.77.2（读取 sidecar/rust-toolchain.toml 自动锁定）
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sidecar
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build all（shared → sidecar → main → renderer）
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Unit tests（main + contract）
+        run: pnpm test:main
+
+      - name: Rust tests
+        run: pnpm test:sidecar
+
+      - name: Integration tests（真实 sidecar 子进程 e2e）
+        run: pnpm test:integration
+
+  # ---------- Job 2：Windows 构建 Win7 目标产物 ----------
+  # 说明：产物为 Win7 SP1 x64 兼容（Electron 22.3.27 锁版 + Rust 1.77.2 MSRV）
+  build-windows:
+    name: Build artifacts (windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm 9
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.13'
+          cache: 'pnpm'
+
+      - name: Setup Rust 1.77.2（MSRV：1.78+ 的 std 要求 Win10，Win7 掉 Tier3）
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sidecar
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared contracts
+        run: pnpm build:shared
+
+      - name: Build sidecar（Rust release → resources/bin/x86_64-pc-windows-msvc/）
+        run: pnpm build:sidecar
+
+      - name: Build electron main
+        run: pnpm build:main
+
+      - name: Build renderer
+        run: pnpm build:renderer
+
+      - name: Generate NOTICES.txt + update yml
+        shell: pwsh
+        run: |
+          cd installer
+          node scripts/gen-notices.mjs .. dist/NOTICES.txt
+          node scripts/gen-update-yml.mjs 0.1.0 dist
+
+      - name: Install NSIS 3
+        run: choco install nsis -y --no-progress
+
+      # 四变体：online/offline × per-user/admin；online 在 Windows 启用真实 INetC 下载
+      # 注意：offline 变体此时只含 payload 占位（真实 payload 需按 BUILD.md 预先准备）
+      - name: Build installers (NSIS x4)
+        shell: pwsh
+        run: |
+          cd installer/nsis
+          makensis /DCODARA_HAS_INETC installer-online.nsi
+          makensis /DCODARA_HAS_INETC /DPER_USER=1 installer-online.nsi
+          makensis installer-offline.nsi
+          makensis /DPER_USER=1 installer-offline.nsi
+
+      - name: Upload artifacts（运行页面底部 Artifacts 区可下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: codara-win7-x64-build
+          path: |
+            resources/bin/x86_64-pc-windows-msvc/codara-sidecar.exe
+            electron/dist/
+            renderer/dist/
+            installer/dist/NOTICES.txt
+            installer/dist/latest.yml
+            installer/dist/*.exe
+          if-no-files-found: error
+          retention-days: 14

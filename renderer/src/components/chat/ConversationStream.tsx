@@ -1,9 +1,10 @@
 // 中栏对话流：用户消息 / Agent 回复（Markdown）/ 实时卡片 / 打字指示
-import { For, Show, createEffect } from 'solid-js';
+import { For, Show, createEffect, createSignal } from 'solid-js';
 
-import { chat } from '../../state/stores';
+import { chat, headApproval, resolveApprovalCard, ui } from '../../state/stores';
 import { renderMarkdown } from '../../util/markdown';
 import { CardRenderer } from '../cards/CardRenderer';
+import { bridge } from '../../ipc/client';
 
 export function ConversationStream() {
   let container: HTMLDivElement | undefined;
@@ -65,6 +66,48 @@ export function ConversationStream() {
           </div>
         </div>
       </Show>
+      <Show when={headApproval()}>
+        {(card) => <ApprovalBanner card={card()} />}
+      </Show>
+    </div>
+  );
+}
+
+/** 阻塞式审批横幅：write/terminal/git 写操作必须人工裁决，未响应则工具永久挂起 */
+function ApprovalBanner(props: { card: import('@codara/contract').ApprovalCard }) {
+  const b = bridge();
+  const [busy, setBusy] = createSignal(false);
+  const respond = async (approved: boolean) => {
+    setBusy(true);
+    try {
+      await b.approvalRespond({ approvalToken: props.card.approvalToken, approved });
+      resolveApprovalCard(props.card.approvalToken, approved);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div class={`approval-banner risk-${props.card.risk}`}>
+      <div class="ab-head">
+        <span class="ab-tag">待审批</span>
+        <span class="ab-title">{props.card.title}</span>
+        <Show when={ui.pendingApprovals.length > 1}>
+          <span class="ab-queue">队列还有 {ui.pendingApprovals.length - 1} 项</span>
+        </Show>
+        <span class={`ab-risk risk-${props.card.risk}`}>风险：{props.card.risk}</span>
+      </div>
+      <div class="ab-reason">{props.card.reason}</div>
+      <Show when={props.card.payload}>
+        <pre class="ab-payload">{JSON.stringify(props.card.payload).slice(0, 500)}</pre>
+      </Show>
+      <div class="ab-actions">
+        <button class="primary" disabled={busy()} onClick={() => respond(true)}>
+          批准
+        </button>
+        <button class="danger" disabled={busy()} onClick={() => respond(false)}>
+          拒绝
+        </button>
+      </div>
     </div>
   );
 }

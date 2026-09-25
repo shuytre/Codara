@@ -3,10 +3,7 @@
 ; INetC 为 NSIS 3 自带插件（零第三方依赖）
 
 !define APP_VERSION_DEF "0.1.0"
-; 命令行已传 -DBUILD_FLAVOR 时以命令行为准（避免重定义冲突）
-!ifndef BUILD_FLAVOR
 !define BUILD_FLAVOR    "online"
-!endif
 !define DOWNLOAD_URL    "https://dl.codara.example.com/stable/${APP_VERSION_DEF}/codara-${APP_VERSION_DEF}-win7-x64-full.7z"
 
 !ifdef PER_USER
