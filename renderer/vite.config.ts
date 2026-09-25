@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 
 export default defineConfig({
   plugins: [solid()],
+  // 相对资源路径：打包后经 file:// 协议加载（默认 '/' 会导致白屏）
+  base: './',
   resolve: {
     alias: {
       // 直接引用契约源码，绕过 CJS re-export 的 rollup 静态分析限制
