@@ -137,7 +137,7 @@ async function onReady(): Promise<void> {
       mainWindow.webContents.send(channel, payload);
     }
   });
-  const tools = new ToolRuntime(sidecar, budget, gateway, scheduler);
+  const tools = new ToolRuntime(sidecar, budget, gateway, settings, scheduler);
   scheduler.attachTools(tools);
   const loop = new AgentLoop(model, sidecar, settings, budget, tools);
 

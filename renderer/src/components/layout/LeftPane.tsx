@@ -2,7 +2,7 @@
 import { createSignal, For, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
-import { chat, crew, setSettings, setUi, settings, ui } from '../../state/stores';
+import { crew, setSettings, setUi, settings, ui } from '../../state/stores';
 
 const ROLE_LABEL: Record<string, string> = {
   coordinator: '调度主控',
@@ -88,19 +88,6 @@ export function LeftPane() {
         />
         显示右栏
       </label>
-      <div class="mode-indicator">
-        当前模式：
-        <select
-          value={chat.mode}
-          onChange={(e) => {
-            chat.mode = e.currentTarget.value as 'ask' | 'plan' | 'goal';
-          }}
-        >
-          <option value="ask">Ask（只读）</option>
-          <option value="plan">默认（极简）</option>
-          <option value="goal">Goal（挂机）</option>
-        </select>
-      </div>
     </aside>
   );
 }

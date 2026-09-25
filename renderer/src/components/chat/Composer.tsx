@@ -1,8 +1,14 @@
-// 输入区：模式选择 + 发送/终止
-import { createSignal, Show } from 'solid-js';
+// 输入区：Codex 式布局 —— 输入框在上，下方左侧模式胶囊、右侧模型切换 + 发送/终止
+import { createSignal, For, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
-import { appendEntry, cards, chat, setChat, usage, setUsage } from '../../state/stores';
+import { appendEntry, chat, setChat, setSettings, settings, setUsage, usage } from '../../state/stores';
+
+const MODES: Array<{ id: 'ask' | 'plan' | 'goal'; label: string; tip: string }> = [
+  { id: 'ask', label: 'Ask', tip: '只读问答，不写文件' },
+  { id: 'plan', label: 'Plan', tip: '先计划后执行' },
+  { id: 'goal', label: 'Goal', tip: '挂机自驱' },
+];
 
 export function Composer() {
   const b = bridge();
@@ -13,6 +19,30 @@ export function Composer() {
   const [ck1, setCk1] = createSignal(false);
   const [ck2, setCk2] = createSignal(false);
   const [ck3, setCk3] = createSignal(false);
+
+  // 当前厂商可用模型（向导在线拉取的多选列表；缺省回退当前模型）
+  const modelOptions = (): string[] => {
+    const p = settings.value?.provider;
+    if (p?.models && p.models.length > 0) return p.models;
+    return p?.model ? [p.model] : [];
+  };
+
+  const switchModel = async (m: string) => {
+    setSettings('value', 'provider', 'model', m); // 乐观更新，失败由下次 settingsGet 校正
+    try {
+      await b.settingsSet({ provider: { model: m } });
+    } catch {
+      /* 保留乐观值；持久化失败不影响本会话 */
+    }
+  };
+
+  const openWorkspace = async () => {
+    const dir = await b.workspaceOpen();
+    if (dir) {
+      const v = await b.settingsGet();
+      setSettings('value', v as never);
+    }
+  };
 
   const send = async () => {
     const t = text().trim();
@@ -57,6 +87,14 @@ export function Composer() {
 
   return (
     <div class="composer">
+      <Show when={!settings.value?.workspacePath}>
+        <div class="ws-banner">
+          <span>未打开工作区 —— 文件 / 终端类工具无法执行</span>
+          <button class="small" onClick={openWorkspace}>
+            打开文件夹
+          </button>
+        </div>
+      </Show>
       <Show when={usage.budget.suspended}>
         <div class="budget-banner">预算已熔断，任务已挂起 —— 请在右栏处理</div>
       </Show>
@@ -77,7 +115,7 @@ export function Composer() {
             预算上限（超限自动停机，不静默续杯）
           </label>
           <div class="small danger-text">仍必须人工审批：沙箱外写入、联网、安装软件、Git 历史改写、高危命令。</div>
-          <div class="composer-bar">
+          <div class="composer-actions" style={{ 'margin-top': '10px' }}>
             <button class="primary" disabled={!(ck1() && ck2() && ck3())} onClick={confirmPrecheck}>
               确认并启动 Goal
             </button>
@@ -100,20 +138,48 @@ export function Composer() {
           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void send();
         }}
       />
-      <div class="composer-bar">
-        <span class="hint">Ctrl+Enter 发送 · 模式：{chat.mode.toUpperCase()} · 卡片 {cards.list.length}</span>
-        <Show
-          when={!sending()}
-          fallback={
-            <button class="danger" onClick={abort}>
-              终止
+      <div class="composer-toolbar">
+        <div class="toolbar-left">
+          <div class="mode-pills">
+            <For each={MODES}>
+              {(m) => (
+                <button
+                  class="mode-pill"
+                  classList={{ active: chat.mode === m.id }}
+                  title={m.tip}
+                  onClick={() => setChat('mode', m.id)}
+                >
+                  {m.label}
+                </button>
+              )}
+            </For>
+          </div>
+          <span class="hint">Ctrl+Enter 发送</span>
+        </div>
+        <div class="composer-actions">
+          <Show when={modelOptions().length > 0}>
+            <select
+              class="model-switch"
+              value={settings.value?.provider.model}
+              title="切换模型"
+              onChange={(e) => void switchModel(e.currentTarget.value)}
+            >
+              <For each={modelOptions()}>{(m) => <option value={m}>{m}</option>}</For>
+            </select>
+          </Show>
+          <Show
+            when={!sending()}
+            fallback={
+              <button class="danger" onClick={abort}>
+                终止
+              </button>
+            }
+          >
+            <button class="primary" onClick={send} disabled={!text().trim()}>
+              发送
             </button>
-          }
-        >
-          <button class="primary" onClick={send} disabled={!text().trim()}>
-            发送
-          </button>
-        </Show>
+          </Show>
+        </div>
       </div>
     </div>
   );

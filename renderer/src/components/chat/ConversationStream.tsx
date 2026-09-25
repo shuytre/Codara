@@ -1,14 +1,19 @@
-// 中栏对话流：用户消息 / Agent 回复 / 流式增量 / 卡片渲染
+// 中栏对话流：用户消息 / Agent 回复（Markdown）/ 实时卡片 / 打字指示
 import { For, Show, createEffect } from 'solid-js';
 
 import { chat } from '../../state/stores';
+import { renderMarkdown } from '../../util/markdown';
 import { CardRenderer } from '../cards/CardRenderer';
 
 export function ConversationStream() {
   let container: HTMLDivElement | undefined;
   createEffect(() => {
-    // 新内容自动滚动到底部
-    chat.entries.length + chat.streamText.length;
+    // 深度追踪条目文本/卡片变化与流式状态，触发自动滚动到底部
+    for (const e of chat.entries) {
+      void e.text.length;
+      void e.cards?.length;
+    }
+    void chat.streaming;
     if (container) {
       container.scrollTop = container.scrollHeight;
     }
@@ -17,7 +22,7 @@ export function ConversationStream() {
   return (
     <div class="conversation" ref={container}>
       <Show
-        when={chat.entries.length > 0 || chat.streamText}
+        when={chat.entries.length > 0}
         fallback={
           <div class="empty-state">
             <h2>Codara</h2>
@@ -40,9 +45,13 @@ export function ConversationStream() {
                   </span>
                 </Show>
               </div>
-              <div class="entry-text">{entry.text}</div>
+              <Show when={entry.text}>
+                <div class="entry-text md" innerHTML={renderMarkdown(entry.text)} />
+              </Show>
               <Show when={entry.cards && entry.cards.length > 0}>
-                <For each={entry.cards}>{(card) => <CardRenderer card={card} />}</For>
+                <div class="entry-cards">
+                  <For each={entry.cards}>{(card) => <CardRenderer card={card} />}</For>
+                </div>
               </Show>
             </div>
           )}
@@ -52,9 +61,8 @@ export function ConversationStream() {
         <div class="entry entry-assistant streaming">
           <div class="entry-meta">
             <span class="role">Codara</span>
-            <span class="typing">…</span>
+            <span class="typing">正在思考…</span>
           </div>
-          <div class="entry-text">{chat.streamText}</div>
         </div>
       </Show>
     </div>

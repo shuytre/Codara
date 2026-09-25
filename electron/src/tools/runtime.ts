@@ -14,6 +14,7 @@ import { ROLE_DEFS } from '../crew/roles';
 
 import { SidecarManager } from '../sidecar/manager';
 import { BudgetLedger } from '../budget/ledger';
+import { SettingsStore } from '../config/settingsStore';
 import { ApprovalGateway } from './gateway';
 
 export interface ToolResult extends Envelope {
@@ -42,6 +43,7 @@ export class ToolRuntime {
     private readonly sidecar: SidecarManager,
     private readonly budget: BudgetLedger,
     private readonly gateway: ApprovalGateway,
+    private readonly settings: SettingsStore,
     private readonly scheduler?: CrewSchedulerLike
   ) {}
 
@@ -259,6 +261,21 @@ export class ToolRuntime {
       return {
         ok: false,
         error: { code: 4002, message: `tool ${tool} is not allowed in Ask mode` },
+        tool,
+        params,
+        durationMs: 0,
+      };
+    }
+
+    // 工作区守卫：fs/终端/搜索/索引类工具以工作区为根，未打开时给出可行动的错误（回注模型转告用户）
+    const needsWorkspace = ['read', 'write', 'terminal', 'git', 'search', 'index.symbols', 'index.semantic'].includes(tool);
+    if (needsWorkspace && !this.settings.get('workspacePath')) {
+      return {
+        ok: false,
+        error: {
+          code: 4003,
+          message: '未打开工作区：请用户先点击输入区上方「打开文件夹」（或左栏「打开」）选择项目文件夹后再执行本工具。',
+        },
         tool,
         params,
         durationMs: 0,

@@ -2,7 +2,7 @@
 import { createEffect, createResource, createSignal, onCleanup, Show } from 'solid-js';
 
 import { bridge } from './ipc/client';
-import { setCrew, settings, setSettings, setUi, appendEntry, setChat, upsertCard, setUsage } from './state/stores';
+import { setCrew, settings, setSettings, setUi, appendEntry, setChat, attachCardToLive, appendDeltaToLive, finalizeLiveEntry, setUsage } from './state/stores';
 import { MainLayout } from './components/layout/MainLayout';
 import { FirstRunWizard } from './components/wizard/FirstRunWizard';
 
@@ -20,17 +20,12 @@ export function App() {
     const offChat = b.onChatEvent((payload) => {
       const p = payload as { kind: string; text?: string; card?: never; usage?: never };
       if (p.kind === 'delta' && p.text) {
-        setChat('streamText', (t) => t + p.text);
+        appendDeltaToLive(p.text);
       } else if (p.kind === 'card' && p.card) {
-        upsertCard(p.card);
+        attachCardToLive(p.card);
       } else if (p.kind === 'done') {
         setChat({ streaming: false, streamText: '' });
-        appendEntry({
-          id: `a-${Date.now()}`,
-          role: 'assistant',
-          text: p.text || '',
-          createdAt: Date.now(),
-        });
+        finalizeLiveEntry(p.text || '');
       }
     });
     const offBudget = b.onBudgetSuspended((payload) => {

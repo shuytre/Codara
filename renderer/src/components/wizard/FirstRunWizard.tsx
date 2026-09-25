@@ -19,6 +19,13 @@ export function FirstRunWizard(props: { onDone: () => void }) {
   const [fetchError, setFetchError] = createSignal('');
   const [effort, setEffort] = createSignal<'fast' | 'balanced' | 'max'>('balanced');
   const [saving, setSaving] = createSignal(false);
+  // 工作区（可选）：立即经 workspace:open 落库并同步 sidecar，跳过后可随时在左栏打开
+  const [wsPath, setWsPath] = createSignal('');
+
+  const chooseWs = async () => {
+    const dir = await b.workspaceOpen();
+    if (dir) setWsPath(dir);
+  };
 
   const pick = (t: VendorTemplate) => {
     setSelected(t);
@@ -148,6 +155,10 @@ export function FirstRunWizard(props: { onDone: () => void }) {
               <option value="max">极致（复杂任务）</option>
             </select>
           </label>
+          <div class="ws-pick">
+            <span>工作区：{wsPath() || '未选择（可选，之后可在左栏打开）'}</span>
+            <button onClick={chooseWs}>选择文件夹…</button>
+          </div>
           <div class="wizard-actions">
             <button onClick={() => setStep(0)}>返回</button>
             <button class="primary" disabled={saving() || !canFinish()} onClick={finish}>
@@ -187,6 +198,10 @@ export function FirstRunWizard(props: { onDone: () => void }) {
             手动输入模型名（可选）
             <input value={manualModel()} onInput={(e) => setManualModel(e.currentTarget.value)} placeholder="如 qwen2.5-coder:7b" />
           </label>
+          <div class="ws-pick">
+            <span>工作区：{wsPath() || '未选择（可选，之后可在左栏打开）'}</span>
+            <button onClick={chooseWs}>选择文件夹…</button>
+          </div>
           <div class="wizard-actions">
             <button onClick={() => setStep(0)}>返回</button>
             <button class="primary" disabled={saving() || !canFinish()} onClick={finish}>

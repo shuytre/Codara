@@ -80,6 +80,32 @@ pre.card-body { white-space: pre-wrap; word-break: break-word; max-height: 300px
 .composer .hint { font-size: 11px; color: var(--ink-tertiary); }
 .budget-banner { background: #fef9ec; color: var(--amber-warn); font-size: 12px; padding: 6px 10px; border-radius: var(--radius); margin-bottom: 8px; }
 
+/* Composer 工具行（Codex 式：模式胶囊在左、模型切换与发送在右） */
+.composer-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.toolbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.mode-pills { display: flex; background: var(--bg-hover); border: 1px solid var(--hairline); border-radius: 999px; padding: 2px; }
+.mode-pill { border: none; background: transparent; padding: 4px 14px; border-radius: 999px; font-size: 12px; color: var(--ink-secondary); cursor: pointer; }
+.mode-pill.active { background: var(--ink-black); color: #fff; }
+.composer-actions { display: flex; align-items: center; gap: 8px; }
+.model-switch { max-width: 240px; font-size: 12px; padding: 4px 8px; }
+.ws-banner { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: #fef9ec; color: var(--amber-warn); font-size: 12px; padding: 6px 10px; border-radius: var(--radius); margin-bottom: 8px; }
+.entry-cards { margin-top: 6px; }
+
+/* Markdown 正文（Agent 回复） */
+.entry-text.md { font-size: 14px; line-height: 1.65; overflow-wrap: break-word; }
+.entry-text.md p { margin: 0 0 8px; }
+.entry-text.md p:last-child { margin-bottom: 0; }
+.entry-text.md h1, .entry-text.md h2, .entry-text.md h3, .entry-text.md h4 { margin: 12px 0 6px; font-size: 15px; }
+.entry-text.md ul, .entry-text.md ol { margin: 6px 0; padding-left: 22px; }
+.entry-text.md li { margin: 3px 0; }
+.entry-text.md code { font-family: var(--mono); font-size: 12px; background: var(--bg-hover); border: 1px solid var(--hairline); border-radius: 4px; padding: 1px 5px; }
+.entry-text.md pre { background: #0f1720; color: #e6edf3; border-radius: 8px; padding: 10px 12px; overflow-x: auto; margin: 8px 0; }
+.entry-text.md pre code { background: none; border: none; padding: 0; color: inherit; }
+.entry-text.md blockquote { border-left: 3px solid var(--hairline); margin: 6px 0; padding: 2px 10px; color: var(--ink-secondary); }
+.entry-text.md table { border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+.entry-text.md th, .entry-text.md td { border: 1px solid var(--hairline); padding: 4px 8px; }
+.entry-text.md a { color: var(--cobalt); }
+
 /* 右栏 */
 .right-pane {
   width: 260px; flex: none;
@@ -127,3 +153,6 @@ pre.card-body { white-space: pre-wrap; word-break: break-word; max-height: 300px
 .model-pick-list { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; max-height: 220px; overflow-y: auto; border: 1px solid var(--hairline, #e3e5e8); border-radius: 8px; padding: 8px 10px; }
 .model-pick-list .check-row { margin: 0; }
 .model-pick-list .code { font-family: Consolas, 'Courier New', monospace; font-size: 12px; }
+/* 向导工作区选择行 */
+.ws-pick { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; color: var(--ink-secondary); }
+.ws-pick span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

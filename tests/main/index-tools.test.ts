@@ -15,7 +15,8 @@ function makeRuntime(sidecarCalls?: Array<{ method: string; params: unknown }>):
   };
   const budget = { tickTurn: () => undefined };
   const gateway = new ApprovalGateway(sidecar as never);
-  return new ToolRuntime(sidecar as never, budget as never, gateway);
+  const settings = { get: (k: string) => (k === 'workspacePath' ? '/tmp/test-ws' : undefined) };
+  return new ToolRuntime(sidecar as never, budget as never, gateway, settings as never);
 }
 
 describe('index tool specs', () => {

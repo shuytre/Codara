@@ -63,10 +63,10 @@ export class AgentLoop {
     for (const w of this.abortWaiters.splice(0)) w();
   }
 
-  /** 可中断等待：p 正常完成返回其值；abort() 触发时立即返回 undefined */
+  /** 可中断等待：正常完成返回其值；真实失败向上抛错；仅 abort() 触发时返回 undefined */
   private raceAbort<T>(p: Promise<T>): Promise<T | undefined> {
     if (this.aborted) return Promise.resolve(undefined);
-    return new Promise<T | undefined>((resolve) => {
+    return new Promise<T | undefined>((resolve, reject) => {
       const waiter = () => resolve(undefined);
       this.abortWaiters.push(waiter);
       p.then(
@@ -78,8 +78,12 @@ export class AgentLoop {
         (e) => {
           const i = this.abortWaiters.indexOf(waiter);
           if (i >= 0) this.abortWaiters.splice(i, 1);
-          resolve(undefined);
-          if (e) logger.warn('operation rejected during abortable wait', e);
+          // abort 引发的连带失败（socket 中断等）不算真实错误；其余必须抛出
+          if (this.aborted) {
+            resolve(undefined);
+            return;
+          }
+          reject(e instanceof Error ? e : new Error(String(e)));
         }
       );
     });
@@ -214,8 +218,24 @@ export class AgentLoop {
         };
         cb.onCard(card);
 
-        // 可中断工具执行（含审批等待）：abort 时立即返回并收尾
-        const r = await this.raceAbort(this.tools.execute(tc.name, params, mode, crew?.role));
+        // 可中断工具执行（含审批等待）：abort → undefined；真实失败 → 回注错误继续循环
+        let r;
+        try {
+          r = await this.raceAbort(this.tools.execute(tc.name, params, mode, crew?.role));
+        } catch (toolErr) {
+          const errMsg = (toolErr as Error)?.message || String(toolErr);
+          logger.warn('tool execution failed', { tool: tc.name, err: errMsg });
+          cb.onCard({ ...card, status: 'failed', result: errMsg.slice(0, 800), ok: false });
+          // 失败结果回注模型：由模型决定重试/换路/向用户说明，而不是终止会话
+          const failMsg: ChatMessage = {
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: JSON.stringify({ ok: false, error: { message: errMsg } }).slice(0, 8000),
+          };
+          this.messages.push(failMsg);
+          void this.persist(crew, failMsg);
+          continue;
+        }
         if (this.aborted || r === undefined) {
           cb.onCard({ ...card, status: 'failed', result: '已终止', ok: false });
           cb.onDone('（已终止）');
