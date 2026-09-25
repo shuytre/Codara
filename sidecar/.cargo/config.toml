@@ -11,3 +11,7 @@ index = "sparse+https://rsproxy.cn/index/"
 
 [net]
 git-fetch-with-cli = true
+
+# Win7 兼容：静态链接 CRT，目标机器无需安装 VC++ Redistributable
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
