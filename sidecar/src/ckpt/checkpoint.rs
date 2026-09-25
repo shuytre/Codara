@@ -54,7 +54,7 @@ pub fn ckpt_list(state: &mut AppState, params: Value) -> Envelope {
     };
     let dir = ckpt_dir(state, &task_id);
     let mut items = Vec::new();
-    if let Ok(mut rd) = std::fs::read_dir(&dir) {
+    if let Ok(rd) = std::fs::read_dir(&dir) {
         let mut files: Vec<_> = rd.flatten().map(|e| e.path()).collect();
         files.sort();
         for f in files {

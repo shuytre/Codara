@@ -7,7 +7,6 @@ use codara_sidecar::{dispatch, state::AppState};
 
 fn main() {
     let stdin = io::stdin();
-    let stdout = io::stdout();
     let mut state = AppState::new();
 
     for line in stdin.lock().lines() {

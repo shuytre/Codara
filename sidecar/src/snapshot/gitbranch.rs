@@ -145,7 +145,6 @@ pub fn list(state: &AppState) -> Envelope {
 }
 
 pub fn restore(state: &mut AppState, snapshot_id: &str, single_file: Option<&str>) -> Envelope {
-    let root = state.workspace_root.clone().unwrap_or_default();
     let mut args: Vec<String> = vec!["checkout".into(), snapshot_id.to_string(), "--".into()];
     match single_file {
         Some(f) => args.push(f.to_string()),

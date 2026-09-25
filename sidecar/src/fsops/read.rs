@@ -135,7 +135,7 @@ pub fn fs_read(state: &mut AppState, params: Value) -> Envelope {
 
     // 重复读缓存：同 path+offset+limit 返回引用
     {
-        let mut cache = state.read_cache.lock().unwrap();
+        let cache = state.read_cache.lock().unwrap();
         if let Some(cached) = cache.get(&cache_key) {
             if cached.content_hash == content_hash {
                 return Envelope::ok(json!({

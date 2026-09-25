@@ -112,7 +112,7 @@ const MIGRATIONS: &[&str] = &[
 pub fn db_migrate(state: &mut AppState, _params: Value) -> Envelope {
     let db_dir = state.app_data_dir.join("db");
     let db_path = db_dir.join("codara.db");
-    let mut db = match open(&db_path) {
+    let db = match open(&db_path) {
         Ok(d) => d,
         Err(e) => return Envelope::err(error::DB_MIGRATION_FAILED, e),
     };
@@ -144,14 +144,6 @@ pub fn db_migrate(state: &mut AppState, _params: Value) -> Envelope {
     }
     *state.db.lock().unwrap() = Some(db);
     Envelope::ok(json!({ "migrated": true, "version": MIGRATIONS.len() }))
-}
-
-fn get_db(state: &AppState) -> Option<std::sync::MutexGuard<'_, Database>> {
-    // 注意：Database 直接持 Connection；通过全局锁串行访问
-    // state.db 存的是 Option<Database>，rusqlite Connection 不是 Sync——
-    // 为满足 Rust 语义，这里以函数内构造临时连接的方式规避。
-    let _ = state;
-    None
 }
 
 /// JSON 参数 → rusqlite 参数的正确映射（禁止 Value::to_string()：会给字符串包 JSON 引号）
