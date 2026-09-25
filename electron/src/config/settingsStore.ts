@@ -8,6 +8,8 @@ export interface SettingsShape {
     templateId?: string;
     endpoint: string;
     model: string;
+    /** 候选模型列表（向导/设置页在线拉取后勾选，可切换） */
+    models?: string[];
     effort: 'fast' | 'balanced' | 'max';
     contextLength: number;
     timeoutMs: number;
@@ -107,5 +109,11 @@ export class SettingsStore {
     } catch (e) {
       // 静默失败：设置写入失败不阻塞主流程
     }
+  }
+
+  /** 恢复初始配置（清空全部设置，含向导完成标记；凭据由 handlers 层另行清除） */
+  resetToDefaults(): void {
+    this.data = JSON.parse(JSON.stringify(DEFAULTS));
+    this.save();
   }
 }

@@ -8,6 +8,8 @@ export const IPC = {
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
   settingsIsConfigured: 'settings:is-configured', // 是否已完成首次向导
+  settingsReset: 'settings:reset', // 恢复初始配置并重启（重现欢迎向导）
+  modelsList: 'models:list', // 按 Base URL + API Key 在线拉取可用模型列表
   // 对话
   chatSend: 'chat:send', // renderer → main：用户消息
   chatAbort: 'chat:abort',
@@ -66,6 +68,8 @@ export interface SettingsPayload {
     templateId?: string;
     endpoint: string;
     model: string;
+    /** 候选模型列表（向导/设置页在线拉取后勾选保存，可切换） */
+    models?: string[];
     effort: 'fast' | 'balanced' | 'max';
     contextLength: number;
     timeoutMs: number;
@@ -87,6 +91,19 @@ export interface SettingsSetPayload {
   ui?: Partial<SettingsPayload['ui']>;
   workspacePath?: string;
   wizardCompleted?: boolean;
+}
+
+/** models:list 请求体 */
+export interface ModelsListPayload {
+  endpoint: string; // OpenAI 兼容 base URL（含 /v1）
+  apiKey?: string; // 本地端点可空
+}
+
+/** models:list 响应体 */
+export interface ModelsListResult {
+  ok: boolean;
+  models: string[];
+  error?: string;
 }
 
 /** usage:snapshot 响应 */

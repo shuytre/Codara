@@ -42,6 +42,10 @@ export class AgentLoop {
   private aborted = false;
   private planApproved = false;
   private pendingPlan: PlanCard | null = null;
+  /** 本轮运行的终止控制器：中断流式请求 / 工具执行 / 审批等待 */
+  private runAbort: AbortController | null = null;
+  /** abort 时唤醒所有 race 等待点 */
+  private abortWaiters: Array<() => void> = [];
 
   constructor(
     private readonly model: ModelClient,
@@ -53,6 +57,32 @@ export class AgentLoop {
 
   abort(): void {
     this.aborted = true;
+    // 中断正在进行的流式请求（http 层 socket 直接断开）
+    this.runAbort?.abort();
+    // 唤醒所有 await 等待点（审批等待、工具执行等）
+    for (const w of this.abortWaiters.splice(0)) w();
+  }
+
+  /** 可中断等待：p 正常完成返回其值；abort() 触发时立即返回 undefined */
+  private raceAbort<T>(p: Promise<T>): Promise<T | undefined> {
+    if (this.aborted) return Promise.resolve(undefined);
+    return new Promise<T | undefined>((resolve) => {
+      const waiter = () => resolve(undefined);
+      this.abortWaiters.push(waiter);
+      p.then(
+        (v) => {
+          const i = this.abortWaiters.indexOf(waiter);
+          if (i >= 0) this.abortWaiters.splice(i, 1);
+          resolve(v);
+        },
+        (e) => {
+          const i = this.abortWaiters.indexOf(waiter);
+          if (i >= 0) this.abortWaiters.splice(i, 1);
+          resolve(undefined);
+          if (e) logger.warn('operation rejected during abortable wait', e);
+        }
+      );
+    });
   }
 
   approvePlan(): void {
@@ -67,6 +97,8 @@ export class AgentLoop {
 
   async run(userText: string, mode: TaskMode, cb: LoopCallbacks, crew?: CrewRunContext): Promise<void> {
     this.aborted = false;
+    this.runAbort = new AbortController();
+    const signal = this.runAbort.signal;
     // 系统提示词：专家团角色用角色提示词；极简模式用三模式变体
     const systemPrompt = crew
       ? ROLE_DEFS[crew.role].systemPrompt
@@ -114,12 +146,23 @@ export class AgentLoop {
                 logger.warn('budget breaker tripped');
               }
             }
-          }
+          },
+          signal
         );
       } catch (err) {
+        if (this.aborted) {
+          // 用户终止：不留错误卡，安静收尾
+          cb.onDone('（已终止）');
+          return;
+        }
         const msg = `模型调用失败：${(err as Error).message}`;
         cb.onDone(msg);
         this.messages.push({ role: 'assistant', content: msg });
+        return;
+      }
+
+      if (this.aborted) {
+        cb.onDone('（已终止）');
         return;
       }
 
@@ -171,7 +214,13 @@ export class AgentLoop {
         };
         cb.onCard(card);
 
-        const r = await this.tools.execute(tc.name, params, mode, crew?.role);
+        // 可中断工具执行（含审批等待）：abort 时立即返回并收尾
+        const r = await this.raceAbort(this.tools.execute(tc.name, params, mode, crew?.role));
+        if (this.aborted || r === undefined) {
+          cb.onCard({ ...card, status: 'failed', result: '已终止', ok: false });
+          cb.onDone('（已终止）');
+          return;
+        }
 
         // diff 卡片：write 成功时产出
         if (tc.name === 'write' && r.ok) {

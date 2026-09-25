@@ -1,5 +1,5 @@
-// 设置页（主对话内弹出）：endpoint/Key/模型/档位/超时/重试/代理/并发 + 清除凭据 + 记忆（M5）
-import { createSignal, onMount, Show } from 'solid-js';
+// 设置页（主对话内弹出）：endpoint/Key/模型（在线拉取/切换）/档位/超时/重试/并发 + 清除凭据 + 恢复初始 + 记忆（M5）
+import { createSignal, For, onMount, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
 import { settings, setSettings, setUi } from '../../state/stores';
@@ -15,6 +15,7 @@ export function SettingsPage(props: { onClose: () => void }) {
   const [apiKey, setApiKey] = createSignal('');
   const [endpoint, setEndpoint] = createSignal(s()?.provider.endpoint || '');
   const [model, setModel] = createSignal(s()?.provider.model || '');
+  const [models, setModels] = createSignal<string[]>(s()?.provider.models || []);
   const [effort, setEffort] = createSignal(s()?.provider.effort || 'balanced');
   const [maxRetries, setMaxRetries] = createSignal(s()?.provider.maxRetries || 3);
   const [turnsLimit, setTurnsLimit] = createSignal(s()?.budget.turnsLimit || 200);
@@ -23,6 +24,12 @@ export function SettingsPage(props: { onClose: () => void }) {
   const [minimal, setMinimal] = createSignal(s()?.ui.minimalMode || false);
   const [saving, setSaving] = createSignal(false);
   const [saved, setSaved] = createSignal(false);
+  // 在线拉取模型
+  const [fetching, setFetching] = createSignal(false);
+  const [fetchError, setFetchError] = createSignal('');
+  // 恢复初始配置
+  const [confirmReset, setConfirmReset] = createSignal(false);
+  const [resetting, setResetting] = createSignal(false);
   // M5 记忆状态
   const [mem, setMem] = createSignal<MemoryLoadResult | null>(null);
   const [importing, setImporting] = createSignal(false);
@@ -54,6 +61,29 @@ export function SettingsPage(props: { onClose: () => void }) {
     }
   };
 
+  const fetchModels = async () => {
+    if (!endpoint().trim()) {
+      setFetchError('请先填写 Base URL');
+      return;
+    }
+    setFetching(true);
+    setFetchError('');
+    try {
+      const r = await b.modelsList({ endpoint: endpoint().trim(), apiKey: apiKey().trim() || undefined });
+      if (r.ok && r.models.length > 0) {
+        setModels(r.models);
+        // 当前激活模型若不在列表中，保留在候选首位
+        if (model() && !r.models.includes(model())) {
+          setModels([model(), ...r.models]);
+        }
+      } else {
+        setFetchError(r.error ? `拉取失败：${r.error}` : '端点未返回模型，可手动输入模型名。');
+      }
+    } finally {
+      setFetching(false);
+    }
+  };
+
   const save = async () => {
     setSaving(true);
     try {
@@ -61,6 +91,7 @@ export function SettingsPage(props: { onClose: () => void }) {
         provider: {
           endpoint: endpoint(),
           model: model(),
+          models: models(),
           effort: effort() as 'fast' | 'balanced' | 'max',
           maxRetries: maxRetries(),
         },
@@ -88,21 +119,51 @@ export function SettingsPage(props: { onClose: () => void }) {
     setApiKey('');
   };
 
+  const resetAll = async () => {
+    setResetting(true);
+    try {
+      await b.settingsReset(); // 清空设置并自动重启 → 重现欢迎向导
+    } finally {
+      setResetting(false);
+    }
+  };
+
   return (
     <div class="wizard">
       <div class="wizard-card">
         <h1>设置</h1>
         <label>
-          Endpoint
+          Base URL
           <input value={endpoint()} onInput={(e) => setEndpoint(e.currentTarget.value)} />
-        </label>
-        <label>
-          模型名
-          <input value={model()} onInput={(e) => setModel(e.currentTarget.value)} />
         </label>
         <label>
           API Key（留空不修改）
           <input type="password" value={apiKey()} onInput={(e) => setApiKey(e.currentTarget.value)} />
+        </label>
+        <div class="wizard-actions" style="justify-content: flex-start">
+          <button disabled={fetching() || !endpoint().trim()} onClick={fetchModels}>
+            {fetching() ? '拉取中…' : '按当前 Base URL / Key 拉取模型列表'}
+          </button>
+        </div>
+        <Show when={fetchError()}>
+          <p class="hint" style="color: #b45309">{fetchError()}</p>
+        </Show>
+        <Show when={models().length > 0}>
+          <div class="model-pick-list">
+            <For each={models()}>
+              {(m) => (
+                <label class="check-row">
+                  <input type="radio" name="active-model" checked={model() === m} onChange={() => setModel(m)} />
+                  <span class="code">{m}</span>
+                </label>
+              )}
+            </For>
+          </div>
+          <p class="hint">单选切换当前使用的模型；保存后立即生效。</p>
+        </Show>
+        <label>
+          模型名（手动输入亦可）
+          <input value={model()} onInput={(e) => setModel(e.currentTarget.value)} />
         </label>
         <label>
           响应档位
@@ -157,6 +218,19 @@ export function SettingsPage(props: { onClose: () => void }) {
           <button class="danger" onClick={clearCredentials}>
             清除全部凭据
           </button>
+          <Show
+            when={!confirmReset()}
+            fallback={
+              <>
+                <button class="danger" disabled={resetting()} onClick={resetAll}>
+                  {resetting() ? '重置中…' : '确认重置并重启'}
+                </button>
+                <button onClick={() => setConfirmReset(false)}>取消</button>
+              </>
+            }
+          >
+            <button onClick={() => setConfirmReset(true)}>恢复初始配置…</button>
+          </Show>
           <span style="flex:1" />
           <button onClick={props.onClose}>关闭</button>
           <button class="primary" disabled={saving()} onClick={save}>

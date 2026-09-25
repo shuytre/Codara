@@ -37,7 +37,8 @@ export class ModelClient implements ModelProvider {
   /** 流式对话：返回最终聚合结果；事件回调实时推送 */
   async chatStream(
     req: ChatRequest,
-    onEvent: (e: StreamEvent) => void
+    onEvent: (e: StreamEvent) => void,
+    signal?: AbortSignal
   ): Promise<ChatResult> {
     const p = this.settings.get('provider');
     const apiKey = await this.budget.getApiKey();
@@ -46,10 +47,15 @@ export class ModelClient implements ModelProvider {
     let attempt = 0;
     for (;;) {
       attempt++;
+      if (signal?.aborted) throw new Error('aborted');
       try {
-        return await this.once(req, onEvent, apiKey, p.endpoint, p.model, p.stripUnknown === true, p.timeoutMs);
+        return await this.once(req, onEvent, apiKey, p.endpoint, p.model, p.stripUnknown === true, p.timeoutMs, signal);
       } catch (err) {
         const e = err as RetryableError;
+        // 用户主动终止：不重试，直接抛出
+        if (signal?.aborted || e.message === 'aborted') {
+          throw new Error('aborted');
+        }
         if (!e.retryable || attempt > maxRetries) {
           throw err;
         }
@@ -73,7 +79,8 @@ export class ModelClient implements ModelProvider {
     endpoint: string,
     model: string,
     stripUnknown: boolean,
-    timeoutMs: number
+    timeoutMs: number,
+    signal?: AbortSignal
   ): Promise<ChatResult> {
     const body: Record<string, unknown> = {
       model,
@@ -107,8 +114,7 @@ export class ModelClient implements ModelProvider {
       (evt) => {
         // SSE delta 解析（归一层）
         if (evt.error) {
-          throw evt.error;
-        }
+          throw evt.error;        }
         if (evt.done) {
           onEvent({ type: 'done' });
           return;
@@ -157,7 +163,8 @@ export class ModelClient implements ModelProvider {
           };
           onEvent({ type: 'usage', ...usage });
         }
-      }
+      },
+      signal
     ).then(() => {
       // done 对账：无 usage 时按 chars/4 估算
       if (usage.promptTokens === 0 && usage.completionTokens === 0) {
@@ -184,7 +191,8 @@ export class ModelClient implements ModelProvider {
     apiKey: string,
     body: string,
     timeoutMs: number,
-    onChunk: (evt: SseEvent) => void
+    onChunk: (evt: SseEvent) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     const url = new URL(endpoint.replace(/\/$/, '') + '/chat/completions');
     const isHttps = url.protocol === 'https:';
@@ -203,6 +211,7 @@ export class ModelClient implements ModelProvider {
             'Content-Length': Buffer.byteLength(body),
           },
           timeout: timeoutMs,
+          signal,
         },
         (res) => {
           const status = res.statusCode || 500;

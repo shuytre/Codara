@@ -9,6 +9,8 @@ import type {
   CrewInstanceView,
   CrewTaskView,
   MemoryLoadResult,
+  ModelsListPayload,
+  ModelsListResult,
   SettingsPayload,
   SettingsSetPayload,
   UsageSnapshot,
@@ -17,6 +19,8 @@ import type {
 export interface CodaraBridge {
   settingsGet(): Promise<SettingsPayload>;
   settingsSet(payload: SettingsSetPayload): Promise<boolean>;
+  settingsReset(): Promise<boolean>;
+  modelsList(payload: ModelsListPayload): Promise<ModelsListResult>;
   chatSend(payload: ChatSendPayload): Promise<boolean>;
   chatAbort(): Promise<boolean>;
   approvalRespond(payload: ApprovalRespondPayload): Promise<boolean>;
@@ -82,6 +86,8 @@ export function bridge(): CodaraBridge {
       ui: { minimalMode: false, rightPaneVisible: true },
     }),
     settingsSet: noop,
+    settingsReset: async () => false,
+    modelsList: async () => ({ ok: false, models: [], error: 'bridge unavailable' }),
     chatSend: noop,
     chatAbort: noop,
     approvalRespond: noop,

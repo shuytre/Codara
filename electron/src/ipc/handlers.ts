@@ -1,5 +1,7 @@
 // IPC 通道注册：白名单 + zod schema 校验（规格：IPC 全 schema 校验）
 import * as fs from 'fs';
+import * as http from 'http';
+import * as https from 'https';
 import * as path from 'path';
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import { z } from 'zod';
@@ -11,6 +13,7 @@ import {
   ChatSendPayload,
   IPC,
   MemoryLoadResult,
+  ModelsListResult,
   SettingsPayload,
   SettingsSetPayload,
   UsageSnapshot,
@@ -98,6 +101,68 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     if (p.workspacePath) {
       await sidecar.setWorkspace(p.workspacePath);
     }
+    return true;
+  });
+
+  // ---------- 在线拉取模型列表（OpenAI 兼容 /models） ----------
+  ipcMain.handle(IPC.modelsList, async (_e, payload: unknown): Promise<ModelsListResult> => {
+    const p = ModelsListSchema.parse(payload);
+    try {
+      const url = new URL(p.endpoint.replace(/\/$/, '') + '/models');
+      const isHttps = url.protocol === 'https:';
+      const mod = isHttps ? https : http;
+      const body = await new Promise<string>((resolve, reject) => {
+        const req = mod.request(
+          {
+            hostname: url.hostname,
+            port: url.port || (isHttps ? 443 : 80),
+            path: url.pathname + url.search,
+            method: 'GET',
+            headers: p.apiKey ? { Authorization: `Bearer ${p.apiKey}` } : {},
+            timeout: 15000,
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (d) => chunks.push(d as Buffer));
+            res.on('end', () => {
+              const status = res.statusCode || 500;
+              const text = Buffer.concat(chunks).toString();
+              if (status >= 400) {
+                reject(new Error(`HTTP ${status}: ${text.slice(0, 200)}`));
+                return;
+              }
+              resolve(text);
+            });
+          }
+        );
+        req.on('timeout', () => req.destroy(new Error('请求超时（15s）')));
+        req.on('error', reject);
+        req.end();
+      });
+      const parsed = JSON.parse(body) as { data?: Array<{ id?: string }> };
+      const models = (parsed.data ?? [])
+        .map((m) => String(m.id ?? ''))
+        .filter((id) => id.length > 0)
+        .sort();
+      return { ok: true, models };
+    } catch (err) {
+      return { ok: false, models: [], error: (err as Error).message };
+    }
+  });
+
+  // ---------- 恢复初始配置（清设置 + 重启重现向导） ----------
+  ipcMain.handle(IPC.settingsReset, async (): Promise<boolean> => {
+    try {
+      // 尽力清除已存凭据（失败不阻塞重置）
+      await budget.deleteApiKey().catch(() => undefined);
+    } catch {
+      // ignore
+    }
+    settings.resetToDefaults();
+    // 重启应用：向导将重新出现
+    const { app } = await import('electron');
+    app.relaunch();
+    app.exit(0);
     return true;
   });
 
@@ -371,12 +436,18 @@ const IndexConfigureSchema = z.object({
   semantic: z.boolean().optional(),
 });
 
+const ModelsListSchema = z.object({
+  endpoint: z.string().min(1),
+  apiKey: z.string().optional(),
+});
+
 const SettingsSetSchema = z.object({
   provider: z
     .object({
       templateId: z.string().optional(),
       endpoint: z.string().optional(),
       model: z.string().optional(),
+      models: z.array(z.string()).optional(),
       effort: z.enum(['fast', 'balanced', 'max']).optional(),
       contextLength: z.number().optional(),
       timeoutMs: z.number().optional(),

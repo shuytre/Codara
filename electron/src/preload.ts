@@ -1,7 +1,7 @@
 // preload：contextBridge 白名单暴露（规格：IPC 全 schema 校验，渲染层零 Node 能力）
 import { contextBridge, ipcRenderer } from 'electron';
 
-import { IPC, type ApprovalCard, type ChatSendPayload, type CrewSpawnPayload, type SettingsSetPayload } from '@codara/contract';
+import { IPC, type ApprovalCard, type ChatSendPayload, type CrewSpawnPayload, type ModelsListPayload, type SettingsSetPayload } from '@codara/contract';
 
 function subscribe<T = unknown>(channel: string, cb: (payload: T) => void): () => void {
   const listener = (_e: unknown, payload: unknown) => cb(payload as T);
@@ -14,6 +14,8 @@ function subscribe<T = unknown>(channel: string, cb: (payload: T) => void): () =
 const api = {
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
   settingsSet: (payload: SettingsSetPayload) => ipcRenderer.invoke(IPC.settingsSet, payload),
+  settingsReset: () => ipcRenderer.invoke(IPC.settingsReset),
+  modelsList: (payload: ModelsListPayload) => ipcRenderer.invoke(IPC.modelsList, payload),
   chatSend: (payload: ChatSendPayload) => ipcRenderer.invoke(IPC.chatSend, payload),
   chatAbort: () => ipcRenderer.invoke(IPC.chatAbort),
   approvalRespond: (payload: { approvalToken: string; approved: boolean }) =>
