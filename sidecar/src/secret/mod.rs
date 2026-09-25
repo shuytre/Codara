@@ -8,7 +8,6 @@ use crate::rpc::error;
 #[cfg(windows)]
 mod imp {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Security::Cryptography::{
         CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
     };
@@ -27,9 +26,9 @@ mod imp {
             let hr = CryptProtectData(
                 &in_blob,
                 PCWSTR::null(),
-                HANDLE::default(),
-                None,
-                None,
+                None, // pOptionalEntropy
+                None, // pvReserved
+                None, // pPromptStruct
                 CRYPTPROTECT_UI_FORBIDDEN,
                 &mut out_blob,
             );
@@ -49,10 +48,10 @@ mod imp {
             let mut out_blob = CRYPT_INTEGER_BLOB::default();
             let hr = CryptUnprotectData(
                 &in_blob,
-                PCWSTR::null(),
-                HANDLE::default(),
-                None,
-                None,
+                None, // ppszDataDescr
+                None, // pOptionalEntropy
+                None, // pvReserved
+                None, // pPromptStruct
                 CRYPTPROTECT_UI_FORBIDDEN,
                 &mut out_blob,
             );

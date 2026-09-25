@@ -298,7 +298,8 @@ trait CreationFlags {
 impl CreationFlags for Command {
     fn creation_flags(&mut self, flags: u32) -> &mut Command {
         use std::os::windows::process::CommandExt;
-        self.creation_flags(flags)
+        // 完全限定调用标准库 trait，避免与本模块同名 trait 产生二义性（E0034）
+        CommandExt::creation_flags(self, flags)
     }
 }
 
