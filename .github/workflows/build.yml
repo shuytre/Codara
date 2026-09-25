@@ -1,0 +1,90 @@
+name: Build Codara
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm 9
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: 安装 Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: 安装 Rust 1.77.2
+        uses: dtolnay/rust-toolchain@1.77.2
+
+      - name: 缓存 Rust 编译产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sidecar
+
+      - name: 安装 NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建
+        run: pnpm build
+
+      - name: 类型检查
+        run: pnpm -r typecheck
+
+      - name: 测试 - Rust sidecar
+        run: pnpm test:sidecar
+
+      - name: 测试 - contract / main / renderer
+        run: |
+          pnpm test:contract
+          pnpm test:main
+          pnpm test:renderer
+
+      - name: 测试 - 集成
+        run: pnpm test:integration
+
+      - name: 准备离线安装器 payload
+        shell: bash
+        run: |
+          mkdir -p installer/nsis/payload
+          cp -r shared/dist   installer/nsis/payload/shared-dist
+          cp -r electron/dist installer/nsis/payload/electron-dist
+          cp -r renderer/dist installer/nsis/payload/renderer-dist
+          cp -r resources/bin installer/nsis/payload/bin
+
+      - name: 打包 NSIS 安装器
+        run: node installer/scripts/build-installer.mjs
+
+      - name: 上传产物 - sidecar 可执行文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: codara-sidecar-win7-x64
+          path: resources/bin/x86_64-pc-windows-msvc/codara-sidecar.exe
+
+      - name: 上传产物 - 应用构建输出
+        uses: actions/upload-artifact@v4
+        with:
+          name: codara-app-dist
+          path: |
+            shared/dist/
+            electron/dist/
+            renderer/dist/
+
+      - name: 上传产物 - NSIS 安装器
+        uses: actions/upload-artifact@v4
+        with:
+          name: codara-installers
+          path: installer/dist/*.exe
