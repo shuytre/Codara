@@ -139,8 +139,10 @@ jobs:
             "main": "dist/main.js"
           }
           '@ | Set-Content -Encoding utf8 "$stage\resources\app\package.json"
-          # renderer（main.ts 按 app/dist/../../renderer/dist 解析）
-          Copy-Item renderer\dist "$stage\resources\renderer" -Recurse -Force
+          # renderer（main.ts 按 app/dist/../../renderer/dist 解析 → 必须保留 dist 层级：
+          # 产物应为 resources\renderer\dist\index.html）
+          New-Item -ItemType Directory -Force -Path "$stage\resources\renderer\dist" | Out-Null
+          Copy-Item renderer\dist\* "$stage\resources\renderer\dist\" -Recurse -Force
           # sidecar（manager.ts 按 process.resourcesPath/bin/<triple>/ 解析）
           Copy-Item resources\bin\x86_64-pc-windows-msvc\codara-sidecar.exe "$stage\resources\bin\x86_64-pc-windows-msvc\" -Force
           Compress-Archive -Path "$stage\*" -DestinationPath "$env:RUNNER_TEMP\Codara-portable-win7-x64.zip" -Force
