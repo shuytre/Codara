@@ -23,7 +23,9 @@ export interface CodaraBridge {
   modelsList(payload: ModelsListPayload): Promise<ModelsListResult>;
   chatSend(payload: ChatSendPayload): Promise<boolean>;
   chatAbort(): Promise<boolean>;
-  chatNew(): Promise<boolean>;
+  chatNew(): Promise<{ ok: boolean; sessionId?: string; error?: string }>;
+  chatSwitch(payload: { sessionId: string }): Promise<{ ok: boolean; error?: string }>;
+  chatMainSession(): Promise<{ sessionId: string | null }>;
   approvalRespond(payload: ApprovalRespondPayload): Promise<boolean>;
   usageSnapshot(): Promise<UsageSnapshot>;
   budgetRespond(payload: BudgetRespondPayload): Promise<boolean>;
@@ -91,7 +93,9 @@ export function bridge(): CodaraBridge {
     modelsList: async () => ({ ok: false, models: [], error: 'bridge unavailable' }),
     chatSend: noop,
     chatAbort: noop,
-    chatNew: noop,
+    chatNew: async () => ({ ok: false, error: 'bridge unavailable' }),
+    chatSwitch: async () => ({ ok: false, error: 'bridge unavailable' }),
+    chatMainSession: async () => ({ sessionId: null }),
     approvalRespond: noop,
     usageSnapshot: async () => ({
       today: { promptTokens: 0, completionTokens: 0, costCNY: 0 },

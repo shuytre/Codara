@@ -14,6 +14,8 @@ export const IPC = {
   chatSend: 'chat:send', // renderer → main：用户消息
   chatAbort: 'chat:abort',
   chatNew: 'chat:new', // 新建对话（新会话 + 清空工作记忆）
+  chatSwitch: 'chat:switch', // 切换会话（加载历史消息，恢复模型上下文）
+  chatMainSession: 'chat:main-session', // 查询启动时创建的主对话原点会话 id
   chatEvent: 'chat:event', // main → renderer：流式事件/卡片（sendToView）
   // 审批
   approvalRespond: 'approval:respond',

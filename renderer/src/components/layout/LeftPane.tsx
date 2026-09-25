@@ -1,39 +1,33 @@
-// 左栏：工作区 + 专家团角色会话树（M3：实例状态/角色/任务分级展示）
+// 左栏：Codex/豆包式对话分组列表（今天 / 更早）+ 工作区 + 视图 + 设置入口
+// 主对话固定首位；「+」新建对话；点击会话切换（恢复历史消息）
 import { createSignal, For, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
-import { cards, chat, crew, setCards, setChat, setSettings, setUi, settings, ui } from '../../state/stores';
-
-const ROLE_LABEL: Record<string, string> = {
-  coordinator: '调度主控',
-  architect: '架构规划师',
-  developer: '开发工程师',
-  reviewer: '审查员',
-  tester: '测试验收员',
-  builder: '构建工程师',
-  researcher: '资料员',
-};
-
-const STATUS_CLASS: Record<string, string> = {
-  QUEUED: 'st-queued',
-  RUNNING: 'st-running',
-  WAITING_APPROVAL: 'st-wait',
-  WAITING_BUDGET: 'st-wait',
-  SUBMITTED: 'st-done',
-  CLOSED: 'st-done',
-  FAILED: 'st-failed',
-};
+import {
+  addConversation,
+  cards,
+  chat,
+  convs,
+  crew,
+  setActiveConversation,
+  setCards,
+  setChat,
+  setSettings,
+  setUi,
+  settings,
+  ui,
+} from '../../state/stores';
 
 export function LeftPane(props: { onOpenSettings: () => void }) {
   const b = bridge();
   const [busy, setBusy] = createSignal(false);
+  const [switching, setSwitching] = createSignal(false);
 
   const openWorkspace = async () => {
     setBusy(true);
     try {
       const dir = await b.workspaceOpen();
       if (dir && settings.value) {
-        // 重新加载设置以刷新工作区
         const v = await b.settingsGet();
         setSettings('value', v as never);
       }
@@ -42,17 +36,58 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
     }
   };
 
-  // 新建对话：主进程建新会话并重置 AgentLoop，渲染层清空本栏
-  const newChat = async () => {
-    await b.chatNew();
+  const clearStream = () => {
     setChat({ entries: [], liveId: null, streaming: false, streamText: '' });
     setCards('list', []);
   };
 
+  // 新建对话：主进程建新会话并重置 AgentLoop，渲染层清空聊天流并入列表（用主进程返回的真实 sessionId）
+  const newChat = async () => {
+    if (switching()) return;
+    setSwitching(true);
+    try {
+      const r = await b.chatNew();
+      if (!r?.ok) throw new Error(r?.error || '新建对话失败');
+      clearStream();
+      addConversation({
+        sessionId: r.sessionId || `c-${Date.now()}`,
+        title: `新对话 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+        createdAt: Date.now(),
+      });
+    } catch (err) {
+      setUi({ toast: `新建对话失败：${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  // 切换会话：主进程恢复历史消息（上下文与聊天流同步重建）
+  const switchTo = async (sessionId: string) => {
+    if (switching() || convs.activeId === sessionId) return;
+    setSwitching(true);
+    try {
+      const r = await b.chatSwitch({ sessionId });
+      if (!r?.ok) throw new Error(r?.error || '切换失败');
+      clearStream();
+      setActiveConversation(sessionId);
+    } catch (err) {
+      setUi({ toast: `切换会话失败：${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  const MAIN: string = '__main__';
+  const isActive = (id: string) => (convs.activeId === null ? id === MAIN : convs.activeId === id);
+
+  // 分组：今天 / 更早（豆包/Codex 分组逻辑）
+  const startOfToday = new Date().setHours(0, 0, 0, 0);
+  const todayConvs = () => convs.list.filter((c) => c.createdAt >= startOfToday);
+  const earlierConvs = () => convs.list.filter((c) => c.createdAt < startOfToday);
+
   return (
     <aside class="left-pane">
-      <div class="pane-title">工作区</div>
-      <div class="ws-row">
+      <div class="ws-row ws-row-head">
         <span class="ws-path" title={settings.value?.workspacePath || '未打开工作区'}>
           {settings.value?.workspacePath || '未打开工作区'}
         </span>
@@ -62,29 +97,34 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
       </div>
 
       <div class="pane-title">
-        任务树
-        <button class="icon-btn" title="新建对话" onClick={newChat}>
+        对话
+        <button class="icon-btn" title="新建对话" disabled={switching()} onClick={newChat}>
           <IconPlus />
         </button>
       </div>
-      <div class="task-tree">
-        <div class="tree-node active">主对话</div>
-        <Show when={crew.tasks.length > 0} fallback={<div class="tree-hint">专家会话（任务创建后显示）</div>}>
-          <For each={crew.tasks}>
-            {(t) => (
-              <div class="crew-task">
-                <div class={`tree-node task-${t.status.toLowerCase()}`}>
-                  {t.title}
-                  <span class={`st-badge ${STATUS_CLASS[t.status] ?? ''}`}>{t.status}</span>
-                </div>
-                <For each={t.instances}>
-                  {(inst) => (
-                    <div class={`tree-node child ${STATUS_CLASS[inst.status] ?? ''}`}>
-                      {ROLE_LABEL[inst.role] || inst.role}
-                      <span class={`st-badge ${STATUS_CLASS[inst.status] ?? ''}`}>{inst.status}</span>
-                    </div>
-                  )}
-                </For>
+      <div class="conv-list">
+        <div
+          class={`conv-item ${isActive(MAIN) ? 'active' : ''}`}
+          onClick={() => (convs.activeId === null ? undefined : switchToMain())}
+        >
+          <span class="conv-name">主对话</span>
+        </div>
+        <Show when={todayConvs().length > 0}>
+          <div class="conv-group">今天</div>
+          <For each={todayConvs()}>
+            {(c) => (
+              <div class={`conv-item ${isActive(c.sessionId) ? 'active' : ''}`} onClick={() => switchTo(c.sessionId)}>
+                <span class="conv-name">{c.title}</span>
+              </div>
+            )}
+          </For>
+        </Show>
+        <Show when={earlierConvs().length > 0}>
+          <div class="conv-group">更早</div>
+          <For each={earlierConvs()}>
+            {(c) => (
+              <div class={`conv-item ${isActive(c.sessionId) ? 'active' : ''}`} onClick={() => switchTo(c.sessionId)}>
+                <span class="conv-name">{c.title}</span>
               </div>
             )}
           </For>
@@ -109,6 +149,27 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
       </div>
     </aside>
   );
+
+  // 切回主对话：主对话 session 由主进程记录（首次启动创建），用 chatSwitch 恢复
+  function switchToMain() {
+    void switchToMainAsync();
+  }
+  async function switchToMainAsync() {
+    if (switching() || convs.activeId === null) return;
+    setSwitching(true);
+    try {
+      const main = await b.chatMainSession();
+      if (!main?.sessionId) throw new Error('主对话会话不可用');
+      const r = await b.chatSwitch({ sessionId: main.sessionId });
+      if (!r?.ok) throw new Error(r?.error || '切换失败');
+      clearStream();
+      setActiveConversation(null); // null = 主对话
+    } catch (err) {
+      setUi({ toast: `切回主对话失败：${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      setSwitching(false);
+    }
+  }
 }
 
 /** lucide: plus */

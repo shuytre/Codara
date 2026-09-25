@@ -33,6 +33,18 @@
 .mode-indicator { margin-top: 10px; font-size: 12px; display: flex; flex-direction: column; gap: 6px; }
 button.small { padding: 3px 8px; font-size: 12px; }
 
+/* 左栏会话列表（Codex/豆包式：主对话固定首位 + 今天/更早分组） */
+.conv-list { display: flex; flex-direction: column; gap: 2px; }
+.conv-group { font-size: 10px; font-weight: 700; color: var(--ink-tertiary); padding: 8px 8px 2px; letter-spacing: .04em; }
+.conv-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 9px; border-radius: 8px; font-size: 13px; color: var(--ink-secondary);
+  cursor: pointer; border: 1px solid transparent;
+}
+.conv-item:hover { background: var(--bg-hover); color: var(--ink); }
+.conv-item.active { background: var(--ink-black); color: #fff; }
+.conv-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* 中栏 */
 .center-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .conversation { flex: 1; overflow-y: auto; padding: 18px 22px; }
@@ -48,8 +60,18 @@ button.small { padding: 3px 8px; font-size: 12px; }
 .entry-meta { display: flex; gap: 10px; font-size: 11px; color: var(--ink-tertiary); margin-bottom: 6px; }
 .entry-meta .role { font-weight: 700; }
 .entry-user .entry-text { font-size: 14px; white-space: pre-wrap; }
-.streaming .typing { animation: blink 1s infinite; }
-@keyframes blink { 50% { opacity: 0; } }
+
+/* 轻量思考状态行（替代独立卡片）：小圆点脉冲 + 灰字，无卡片框 */
+.thinking-row {
+  display: flex; align-items: center; gap: 8px;
+  max-width: 860px; padding: 2px 2px 12px;
+  font-size: 12px; color: var(--ink-tertiary);
+}
+.thinking-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--cobalt); animation: pulse 1.1s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: .25; transform: scale(.8); } 50% { opacity: 1; transform: scale(1); } }
 
 /* 卡片 */
 .card { border: 1px solid var(--hairline); border-radius: var(--radius); background: var(--bg-panel); margin-top: 10px; overflow: hidden; }
@@ -80,12 +102,10 @@ pre.card-body { white-space: pre-wrap; word-break: break-word; max-height: 300px
 .composer .hint { font-size: 11px; color: var(--ink-tertiary); }
 .budget-banner { background: #fef9ec; color: var(--amber-warn); font-size: 12px; padding: 6px 10px; border-radius: var(--radius); margin-bottom: 8px; }
 
-/* Composer 工具行（Codex 式：模式胶囊在左、模型切换与发送在右） */
+/* Composer 工具行（Codex 式：模式下拉在左、模型切换与发送在右） */
 .composer-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
 .toolbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.mode-pills { display: flex; background: var(--bg-hover); border: 1px solid var(--hairline); border-radius: 999px; padding: 2px; }
-.mode-pill { border: none; background: transparent; padding: 4px 14px; border-radius: 999px; font-size: 12px; color: var(--ink-secondary); cursor: pointer; }
-.mode-pill.active { background: var(--ink-black); color: #fff; }
+.mode-select { width: auto; max-width: 200px; font-size: 12px; padding: 5px 8px; }
 .composer-actions { display: flex; align-items: center; gap: 8px; }
 .model-switch { max-width: 240px; font-size: 12px; padding: 4px 8px; }
 .ws-banner { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: #fef9ec; color: var(--amber-warn); font-size: 12px; padding: 6px 10px; border-radius: var(--radius); margin-bottom: 8px; }

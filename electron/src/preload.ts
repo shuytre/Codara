@@ -19,6 +19,8 @@ const api = {
   chatSend: (payload: ChatSendPayload) => ipcRenderer.invoke(IPC.chatSend, payload),
   chatAbort: () => ipcRenderer.invoke(IPC.chatAbort),
   chatNew: () => ipcRenderer.invoke(IPC.chatNew),
+  chatSwitch: (payload: { sessionId: string }) => ipcRenderer.invoke(IPC.chatSwitch, payload),
+  chatMainSession: () => ipcRenderer.invoke(IPC.chatMainSession),
   approvalRespond: (payload: { approvalToken: string; approved: boolean }) =>
     ipcRenderer.invoke(IPC.approvalRespond, payload),
   usageSnapshot: () => ipcRenderer.invoke(IPC.usageSnapshot),

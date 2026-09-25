@@ -28,7 +28,7 @@ export function ConversationStream() {
           <div class="empty-state">
             <h2>Codara</h2>
             <p>用自然语言描述目标：例如「这个老项目编译不过，帮我修好」</p>
-            <p class="hint">Ask 只读 · Plan 先计划后执行 · Goal 挂机自驱</p>
+            <p class="hint">极简 · 标准（全工具） · Goal 挂机自驱</p>
           </div>
         }
       >
@@ -59,11 +59,9 @@ export function ConversationStream() {
         </For>
       </Show>
       <Show when={chat.streaming}>
-        <div class="entry entry-assistant streaming">
-          <div class="entry-meta">
-            <span class="role">Codara</span>
-            <span class="typing">正在思考…</span>
-          </div>
+        <div class="thinking-row">
+          <span class="thinking-dot" />
+          <span>正在思考…</span>
         </div>
       </Show>
       <Show when={headApproval()}>

@@ -1,8 +1,9 @@
 // 卡片注册与渲染：九类结构化卡片（规格 2.2）
-import { Show, Switch, Match } from 'solid-js';
+import { Show, Switch, Match, createSignal } from 'solid-js';
 
 import type { Card } from '@codara/contract';
 import { bridge } from '../../ipc/client';
+import { resolveApprovalCard } from '../../state/stores';
 
 export function CardRenderer(props: { card: Card }) {
   return (
@@ -110,8 +111,18 @@ function DiffCardView(props: { card: import('@codara/contract').DiffCard }) {
 
 function ApprovalCardView(props: { card: import('@codara/contract').ApprovalCard }) {
   const b = bridge();
+  const [busy, setBusy] = createSignal(false);
+  // 已裁决（approved/rejected）只读展示，按钮消失 → 修复「批准后审批卡残留」
+  const settled = () => props.card.status === 'approved' || props.card.status === 'rejected';
   const respond = async (approved: boolean) => {
-    await b.approvalRespond({ approvalToken: props.card.approvalToken, approved });
+    setBusy(true);
+    try {
+      await b.approvalRespond({ approvalToken: props.card.approvalToken, approved });
+      // 三处卡片状态同步（cards.list / pendingApprovals / entries.cards），缺一会残留
+      resolveApprovalCard(props.card.approvalToken, approved);
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <div class={`card card-approval risk-${props.card.risk}`}>
@@ -123,14 +134,25 @@ function ApprovalCardView(props: { card: import('@codara/contract').ApprovalCard
         <strong>{props.card.title}</strong>
         <div>{props.card.reason}</div>
       </div>
-      <div class="card-actions">
-        <button class="primary" onClick={() => respond(true)}>
-          批准
-        </button>
-        <button class="danger" onClick={() => respond(false)}>
-          拒绝
-        </button>
-      </div>
+      <Show
+        when={!settled()}
+        fallback={
+          <div class="card-actions">
+            <span class={`badge ${props.card.status === 'approved' ? 'ok' : 'bad'}`}>
+              {props.card.status === 'approved' ? '已批准' : '已拒绝'}
+            </span>
+          </div>
+        }
+      >
+        <div class="card-actions">
+          <button class="primary" disabled={busy()} onClick={() => respond(true)}>
+            批准
+          </button>
+          <button class="danger" disabled={busy()} onClick={() => respond(false)}>
+            拒绝
+          </button>
+        </div>
+      </Show>
     </div>
   );
 }

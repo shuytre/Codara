@@ -1,5 +1,5 @@
 // Codara 主进程入口：窗口生命周期、sidecar 托管、IPC 注册、恢复入口（M4）
-import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import * as path from 'path';
 
 import { registerIpcHandlers } from './ipc/handlers';
@@ -13,69 +13,6 @@ import { ToolRuntime } from './tools/runtime';
 import { CrewScheduler } from './crew/scheduler';
 import { IPC } from '@codara/contract';
 import { logger } from './util/logger';
-
-/** 中文应用菜单（保留 Electron 内置角色与快捷键） */
-function setupChineseMenu(): void {
-  const template: Electron.MenuItemConstructorOptions[] = [
-    {
-      label: '文件',
-      submenu: [{ role: 'quit', label: '退出' }],
-    },
-    {
-      label: '编辑',
-      submenu: [
-        { role: 'undo', label: '撤销' },
-        { role: 'redo', label: '重做' },
-        { type: 'separator' },
-        { role: 'cut', label: '剪切' },
-        { role: 'copy', label: '复制' },
-        { role: 'paste', label: '粘贴' },
-        { role: 'selectAll', label: '全选' },
-      ],
-    },
-    {
-      label: '视图',
-      submenu: [
-        { role: 'reload', label: '重新加载' },
-        { role: 'forceReload', label: '强制重新加载' },
-        { role: 'toggleDevTools', label: '开发者工具' },
-        { type: 'separator' },
-        { role: 'resetZoom', label: '实际大小' },
-        { role: 'zoomIn', label: '放大' },
-        { role: 'zoomOut', label: '缩小' },
-        { type: 'separator' },
-        { role: 'togglefullscreen', label: '全屏' },
-      ],
-    },
-    {
-      label: '窗口',
-      submenu: [
-        { role: 'minimize', label: '最小化' },
-        { role: 'zoom', label: '最大化' },
-        { role: 'close', label: '关闭' },
-      ],
-    },
-    {
-      label: '帮助',
-      submenu: [
-        {
-          label: '关于 Codara',
-          click: () => {
-            const win = BrowserWindow.getAllWindows()[0];
-            if (!win) return;
-            void dialog.showMessageBox(win, {
-              type: 'info',
-              title: '关于 Codara',
-              message: 'Codara 对话式编程 Agent',
-              detail: 'Win7 SP1+ / Electron 22 · 支持 DeepSeek、Agnes、GLM、通义千问、Kimi 与任意 OpenAI 兼容端点',
-            });
-          },
-        },
-      ],
-    },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
-}
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -95,7 +32,8 @@ if (!gotLock) {
     }
   });
 
-  setupChineseMenu();
+  // 应用菜单：置空（用户要求去掉原生菜单栏；DevTools 快捷键仅 dev 模式保留）
+  Menu.setApplicationMenu(null);
 
   app
     .whenReady()

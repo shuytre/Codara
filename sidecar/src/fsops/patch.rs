@@ -90,8 +90,18 @@ pub fn fs_patch(state: &mut AppState, params: Value) -> Envelope {
         let _ = hasher;
     }
 
-    let (mut lines, trailing_newline) = if !exists {
-        // create 模式：所有 edit 的 newText 顺序拼接为初始内容（不匹配 oldText）
+    // create=true 语义：创建或整体覆盖。文件已存在且所有 edit 均为纯 newText
+    // （无 oldText/锚点）时，模型意图是整体重写 —— 走与新建相同的拼接路径，
+    // 而不是进入锚点校验循环误报 "edit must contain oldText|insertAfter|insertBefore"。
+    // （实机回归：上一轮写入超时后文件已存在，模型带 create:true 重写整文件被拒）
+    let overwrite_existing = exists
+        && create
+        && edits.iter().all(|e| {
+            e.get("oldText").is_none() && e.get("insertAfter").is_none() && e.get("insertBefore").is_none()
+        });
+
+    let (mut lines, trailing_newline) = if !exists || overwrite_existing {
+        // create/覆盖模式：所有 edit 的 newText 顺序拼接为完整内容（不匹配锚点）
         let mut content = String::new();
         for edit in &edits {
             if let Some(n) = edit.get("newText").and_then(|v| v.as_str()) {
@@ -104,11 +114,8 @@ pub fn fs_patch(state: &mut AppState, params: Value) -> Envelope {
         (split_lines(decoded.as_bytes()).0, decoded.ends_with('\n'))
     };
 
-    // 逐个 edit 应用
-    // 新建文件（!exists）时内容已在上方由 newText 顺序拼接完成，
-    // 此时 edits 通常只含 newText、不含锚点，必须跳过校验循环，否则误报
-    // "edit must contain oldText|insertAfter|insertBefore"。
-    if exists {
+    // 逐个 edit 应用（仅编辑模式；create 新建/整体覆盖已由 newText 拼接完成）
+    if exists && !overwrite_existing {
     for edit in &edits {
         if let Some(old) = edit.get("oldText").and_then(|v| v.as_str()) {
             let new = edit.get("newText").and_then(|v| v.as_str()).unwrap_or("");

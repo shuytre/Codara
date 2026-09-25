@@ -239,20 +239,72 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   });
 
   // 新建对话：切换新会话（原会话消息仍在 sidecar 中），清空 AgentLoop 工作记忆
-  ipcMain.handle(IPC.chatNew, async (): Promise<boolean> => {
-    deps.loop.abort();
-    gateway.setGoalPreAuthorized(false);
-    deps.loop.reset();
+  ipcMain.handle(IPC.chatNew, async (): Promise<{ ok: boolean; sessionId?: string; error?: string }> => {
     try {
+      deps.loop.abort();
+      gateway.setGoalPreAuthorized(false);
+      deps.loop.reset();
       const sess = await sidecar.call('session.create', { kind: 'main', title: `对话 ${new Date().toLocaleString('zh-CN')}` });
       const data = sess.data as { sessionId?: string } | undefined;
       if (sess.ok && data?.sessionId) {
         deps.loop.attachMainSession(String(data.sessionId));
+        return { ok: true, sessionId: String(data.sessionId) };
       }
+      return { ok: false, error: 'session create failed' };
     } catch (err) {
       logger.warn('new chat session create failed', err);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
-    return true;
+  });
+
+  // 切换会话：绑定目标会话并恢复历史消息为模型上下文（左栏对话列表点击）
+  ipcMain.handle(IPC.chatSwitch, async (_e, payload: unknown): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const p = z.object({ sessionId: z.string().min(1) }).parse(payload);
+      deps.loop.abort();
+      deps.loop.reset();
+      deps.loop.attachMainSession(p.sessionId);
+      // 恢复历史（roleId=main 约定；失败不阻塞切换，仅失去模型上下文）
+      const hist = await sidecar.call('msg.list', { sessionId: p.sessionId, roleId: 'main', limit: 200 });
+      if (hist.ok) {
+        const rows = (hist.data as { messages?: Array<Record<string, unknown>> } | undefined)?.messages ?? [];
+        const history = rows
+          .map((r) => {
+            const role = String(r.role ?? 'assistant');
+            const raw = r.content;
+            let content = '';
+            if (typeof raw === 'string') {
+              try {
+                const parsed = JSON.parse(raw) as unknown;
+                content = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+              } catch {
+                content = raw;
+              }
+            }
+            const m: Record<string, unknown> = { role, content };
+            if (r.toolCallId) m.tool_call_id = r.toolCallId;
+            if (r.toolCalls) {
+              try {
+                m.tool_calls = JSON.parse(String(r.toolCalls));
+              } catch {
+                /* 忽略损坏行 */
+              }
+            }
+            return m as never;
+          })
+          .filter((m) => Boolean((m as { content?: string }).content));
+        deps.loop.loadMessages(history);
+      }
+      return { ok: true };
+    } catch (err) {
+      logger.warn('chat switch failed', err);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // 主对话原点会话 id（启动时创建；chatNew 换会话不影响原点，左栏「主对话」回切用）
+  ipcMain.handle(IPC.chatMainSession, async (): Promise<{ sessionId: string | null }> => {
+    return { sessionId: deps.loop.getMainSessionId() };
   });
 
   // ---------- Goal 预授权（M4，规格 4.7） ----------

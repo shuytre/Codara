@@ -9,6 +9,7 @@
   --hairline: #dcdfe3;
   --cobalt: #0a57c2;          /* CTA 主色 */
   --cobalt-hover: #084aa8;
+  --cobalt-ghost: #e8f0fb;    /* cobalt 淡底（徽标/队列计数） */
   --ink-black: #1c2b33;       /* 激活态胶囊 */
   --green-ok: #1a7f37;
   --red-danger: #c62828;
@@ -109,12 +110,21 @@ details > pre.card-body { border-radius: 0 0 12px 12px; }
 .foot-btn:hover { background: var(--bg-hover); color: var(--cobalt); }
 .foot-btn svg { flex: none; }
 
-/* ---- 发送/终止：图标圆钮 ---- */
+/* ---- 发送/终止：圆形图标钮（比例均衡） ---- */
 .send-btn {
   display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
-  border-radius: 10px;
+  border-radius: 999px;
 }
 .send-btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ---- 全局轻提示（toast，MainLayout 自动清除） ---- */
+.toast {
+  position: fixed; left: 50%; bottom: 78px; transform: translateX(-50%);
+  background: var(--ink-black); color: #fff; font-size: 12px;
+  padding: 8px 16px; border-radius: 999px;
+  box-shadow: 0 4px 16px rgba(28, 43, 51, .18);
+  z-index: 1000; pointer-events: none; max-width: 70vw;
+}
 
 /* ---- 阻塞式审批横幅（write/terminal/git 写操作） ---- */
 .approval-banner {

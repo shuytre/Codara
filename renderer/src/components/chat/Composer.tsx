@@ -1,13 +1,14 @@
-// 输入区：Codex 式布局 —— 输入框在上，下方左侧模式胶囊、右侧模型切换 + 发送/终止
+// 输入区：Codex 式布局 —— 输入框在上，下方左侧模式下拉、右侧模型切换 + 发送/终止
 import { createSignal, For, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
-import { appendEntry, chat, setChat, setSettings, settings, setUsage, usage } from '../../state/stores';
+import { appendEntry, chat, setChat, setSettings, settings, setUi, setUsage, usage } from '../../state/stores';
 
-const MODES: Array<{ id: 'ask' | 'plan' | 'goal'; label: string; tip: string }> = [
-  { id: 'ask', label: 'Ask', tip: '只读问答，不写文件' },
-  { id: 'plan', label: 'Plan', tip: '先计划后执行' },
-  { id: 'goal', label: 'Goal', tip: '挂机自驱' },
+/** 原生下拉选项（ask=极简零工具；plan=标准全工具；goal=挂机自驱） */
+const MODE_OPTIONS: Array<{ id: 'ask' | 'plan' | 'goal'; label: string; tip: string }> = [
+  { id: 'ask', label: '极简模式（默认）', tip: '纯问答，不调用工具、不写文件' },
+  { id: 'goal', label: 'Goal 模式', tip: '给定目标与验收标准，预授权后挂机自驱' },
+  { id: 'plan', label: '标准模式（全工具）', tip: '全工具可用，先计划后执行' },
 ];
 
 export function Composer() {
@@ -15,6 +16,8 @@ export function Composer() {
   const [text, setText] = createSignal('');
   const [sending, setSending] = createSignal(false);
   const [precheckOpen, setPrecheckOpen] = createSignal(false);
+  // Goal 预授权状态：确认通过后置 true，send 不再重复弹预检卡（修复「确认并启动」无反应）
+  const [preauthorized, setPreauthorized] = createSignal(false);
   // 预授权三勾选（规格 4.7：逐项确认，任一未勾不开）
   const [ck1, setCk1] = createSignal(false);
   const [ck2, setCk2] = createSignal(false);
@@ -47,8 +50,8 @@ export function Composer() {
   const send = async () => {
     const t = text().trim();
     if (!t || sending()) return;
-    // Goal 模式且未预授权：先弹预授权告知卡
-    if (chat.mode === 'goal' && !precheckOpen()) {
+    // Goal 模式且未预授权：先弹预授权告知卡（预授权通过后不再拦截）
+    if (chat.mode === 'goal' && !preauthorized()) {
       setPrecheckOpen(true);
       return;
     }
@@ -73,16 +76,21 @@ export function Composer() {
       confirmWhitelistCommands: ck2(),
       confirmBudget: ck3(),
     });
-    setPrecheckOpen(false);
     if (ok) {
-      // 预授权完成，自动重放发送
+      setPreauthorized(true);
+      setPrecheckOpen(false);
+      // 已预授权，自动重放发送（send 内守卫见 preauthorized 而非弹框状态）
       await send();
+    } else {
+      setUi({ toast: 'Goal 预授权未完成：需勾选全部三项' });
     }
   };
 
   const abort = async () => {
     await b.chatAbort();
     setChat({ streaming: false });
+    // 主进程已撤销 Goal 预授权，本地状态同步回退
+    setPreauthorized(false);
   };
 
   return (
@@ -127,9 +135,9 @@ export function Composer() {
         rows="3"
         placeholder={
           chat.mode === 'ask'
-            ? 'Ask：提出问题（Agent 只读，不写文件）'
+            ? '极简模式：提出问题，Agent 直接回答（零工具）'
             : chat.mode === 'plan'
-              ? 'Plan：描述目标，Agent 先出计划，批准后执行'
+              ? '标准模式：描述目标，Agent 先出计划，批准后执行'
               : 'Goal：给定目标与验收标准，挂机自驱'
         }
         value={text()}
@@ -140,20 +148,18 @@ export function Composer() {
       />
       <div class="composer-toolbar">
         <div class="toolbar-left">
-          <div class="mode-pills">
-            <For each={MODES}>
-              {(m) => (
-                <button
-                  class="mode-pill"
-                  classList={{ active: chat.mode === m.id }}
-                  title={m.tip}
-                  onClick={() => setChat('mode', m.id)}
-                >
-                  {m.label}
-                </button>
-              )}
-            </For>
-          </div>
+          <select
+            class="mode-select"
+            value={chat.mode}
+            title={MODE_OPTIONS.find((m) => m.id === chat.mode)?.tip}
+            onChange={(e) => {
+              setChat('mode', e.currentTarget.value as 'ask' | 'plan' | 'goal');
+              // 切换模式后 Goal 预授权状态作废，再次进入 Goal 需重新确认
+              setPreauthorized(false);
+            }}
+          >
+            <For each={MODE_OPTIONS}>{(m) => <option value={m.id}>{m.label}</option>}</For>
+          </select>
           <span class="hint">Ctrl+Enter 发送</span>
         </div>
         <div class="composer-actions">
@@ -176,7 +182,7 @@ export function Composer() {
             }
           >
             <button class="send-btn primary" onClick={send} disabled={!text().trim()} title="发送（Ctrl+Enter）">
-              <IconArrowUp />
+              <IconMoveUp />
             </button>
           </Show>
         </div>
@@ -185,8 +191,8 @@ export function Composer() {
   );
 }
 
-/** lucide: arrow-up */
-function IconArrowUp() {
+/** lucide: move-up（收短居中版：杆不过长、箭头与杆比例均衡，适配圆形按钮） */
+function IconMoveUp() {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -199,8 +205,8 @@ function IconArrowUp() {
       stroke-linecap="round"
       stroke-linejoin="round"
     >
-      <path d="m5 12 7-7 7 7" />
-      <path d="M12 19V5" />
+      <path d="M8 10l4-4 4 4" />
+      <path d="M12 6v12" />
     </svg>
   );
 }

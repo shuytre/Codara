@@ -99,6 +99,13 @@ export class AgentLoop {
     this.pendingPlan = null;
   }
 
+  /** 会话切换：恢复历史消息为模型上下文（配合 attachMainSession 使用） */
+  loadMessages(history: ChatMessage[]): void {
+    this.messages = history.slice();
+    this.planApproved = false;
+    this.pendingPlan = null;
+  }
+
   async run(userText: string, mode: TaskMode, cb: LoopCallbacks, crew?: CrewRunContext): Promise<void> {
     this.aborted = false;
     this.runAbort = new AbortController();
@@ -304,10 +311,18 @@ export class AgentLoop {
 
   /** 主对话会话（kind=main）：设置后主对话消息按 roleId=main 持久化 */
   attachMainSession(sessionId: string): void {
+    // 首次绑定的会话视为「主对话」原点：后续 chatNew 换会话后，左栏仍可回切到它
+    if (!this.originalSessionId) this.originalSessionId = sessionId;
     this.mainSessionId = sessionId;
   }
 
+  /** 启动时创建的原始主对话会话 id（左栏「主对话」回切用） */
+  getMainSessionId(): string | null {
+    return this.originalSessionId;
+  }
+
   private mainSessionId: string | null = null;
+  private originalSessionId: string | null = null;
 }
 
 function summarizeResult(r: unknown): string {

@@ -6,10 +6,30 @@ export const [chat, setChat] = createStore({
   entries: [] as ChatEntry[],
   streaming: false,
   streamText: '',
-  mode: 'plan' as 'ask' | 'plan' | 'goal',
+  mode: 'ask' as 'ask' | 'plan' | 'goal', // 默认极简模式（纯问答零工具）
   /** 本轮流式回复的条目 id：卡片/增量实时挂载点，done 时收尾 */
   liveId: null as string | null,
 });
+
+/** 左栏会话列表（Codex/豆包式）：主对话固定首位，新建的对话追加 */
+export interface ConversationItem {
+  sessionId: string;
+  title: string;
+  createdAt: number;
+}
+export const [convs, setConvs] = createStore<{
+  list: ConversationItem[];
+  activeId: string | null; // null = 主对话
+}>({ list: [], activeId: null });
+
+export function addConversation(item: ConversationItem): void {
+  setConvs('list', (prev) => [...prev, item]);
+  setConvs('activeId', item.sessionId);
+}
+
+export function setActiveConversation(sessionId: string | null): void {
+  setConvs('activeId', sessionId);
+}
 
 export const [cards, setCards] = createStore<{ list: Card[] }>({ list: [] });
 
@@ -31,6 +51,8 @@ export const [ui, setUi] = createStore({
   rightPaneVisible: true,
   budgetDialogOpen: false,
   settingsOpen: false,
+  /** 全局轻提示（toast）：非阻塞，MainLayout 自动清除 */
+  toast: '' as string,
   /** 待处理审批队列：模型可能并行发起多个 ask 级工具，必须排队而非覆盖 */
   pendingApprovals: [] as import('@codara/contract').ApprovalCard[],
 });
