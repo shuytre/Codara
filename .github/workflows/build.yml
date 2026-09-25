@@ -33,9 +33,6 @@ jobs:
         with:
           workspaces: sidecar
           cache-on-failure: true
-          key: ${{ runner.os }}-cargo-${{ hashFiles('sidecar/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: 安装 NSIS
         run: choco install nsis -y --no-progress
@@ -52,7 +49,7 @@ jobs:
           $found = $candidates | Where-Object { Test-Path (Join-Path $_ "makensis.exe") } | Select-Object -First 1
           if ($found) {
             Add-Content $env:GITHUB_PATH $found
-            Write-Host "makensis found at: $found"
+            Write-Host "::notice title=nsis-path::makensis found at: $found"
           } else {
             Write-Host "::warning::makensis.exe not found in candidate dirs"
             Get-ChildItem "C:\Program Files (x86)", "C:\Program Files", "$env:ProgramData\chocolatey\lib" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "nsis" } | ForEach-Object { Write-Host "NSIS-like dir: $($_.FullName)" }
@@ -88,7 +85,18 @@ jobs:
           cp -r resources/bin installer/nsis/payload/bin
 
       - name: 打包 NSIS 安装器
-        run: node installer/scripts/build-installer.mjs
+        shell: pwsh
+        run: |
+          $out = node installer/scripts/build-installer.mjs 2>&1
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) {
+            $out | Select-Object -Last 8 | ForEach-Object {
+              $msg = ($_ -replace '%', '%25') -replace "`r|`n", ' '
+              Write-Host "::error title=nsis::$msg"
+            }
+            exit $code
+          }
 
       - name: 上传产物 - sidecar 可执行文件
         uses: actions/upload-artifact@v4
