@@ -19,12 +19,21 @@ const VARIANTS = [
 ];
 
 const produced = [];
+// POSIX 版 makensis 只接受 '-' 开关前缀；Windows 版两者皆可，保持 '/'
+const switchPrefix = process.platform === 'win32' ? '/' : '-';
 for (const v of VARIANTS) {
   const defines = [`BUILD_FLAVOR=${v.script.includes('online') ? 'online' : 'offline'}`];
   if (v.perUser) defines.push('PER_USER=1');
-  const args = ['/D' + defines[0], ...(v.perUser ? ['/DPER_USER=1'] : []), v.script];
+  const args = [switchPrefix + 'D' + defines[0], ...(v.perUser ? [switchPrefix + 'DPER_USER=1'] : []), v.script];
   console.log(`> makensis ${args.join(' ')}`);
-  execFileSync('makensis', args, { cwd: nsisDir, stdio: 'inherit' });
+  try {
+    execFileSync('makensis', args, { cwd: nsisDir, stdio: 'pipe' });
+  } catch (e) {
+    // 转发 makensis 的真实编译输出（CI 依赖此输出定位错误）
+    if (e.stdout) process.stdout.write(e.stdout);
+    if (e.stderr) process.stderr.write(e.stderr);
+    throw e;
+  }
 
   const flavor = v.script.includes('online') ? 'online' : 'offline';
   const mode = v.perUser ? 'per-user' : 'admin';

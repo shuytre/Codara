@@ -3,7 +3,10 @@
 ; 资源目录：installer/payload/（构建流水把 electron-dist、sidecar、MinGit、fonts 放入）
 
 !define APP_VERSION_DEF "0.1.0"
+; 命令行已传 -DBUILD_FLAVOR 时以命令行为准（避免重定义冲突）
+!ifndef BUILD_FLAVOR
 !define BUILD_FLAVOR    "offline"
+!endif
 
 !ifdef PER_USER
   RequestExecutionLevel user
