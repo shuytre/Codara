@@ -61,12 +61,21 @@ export function Composer() {
     setSending(true);
     try {
       await b.chatSend({ text: t, mode: chat.mode });
+    } catch (err) {
+      // 原实现无 catch：端点不可达/未配 Key 时表现为「输入框清空了、什么都没发生」
+      const msg = err instanceof Error ? err.message : String(err);
+      setUi({ toast: `发送失败：${msg}` });
+      appendEntry({
+        id: `s-${Date.now()}`,
+        role: 'system' as never,
+        text: `发送失败：${msg}。请检查模型配置（端点与 API Key）后重试。`,
+        createdAt: Date.now(),
+      });
     } finally {
       setSending(false);
       setChat({ streaming: false });
-      // 刷新用量
-      const snap = await b.usageSnapshot();
-      setUsage(snap);
+      // 刷新用量（失败不影响主流程，且不能放在 finally 里 await，否则会掩盖上面的异常）
+      void b.usageSnapshot().then(setUsage).catch(() => undefined);
     }
   };
 
