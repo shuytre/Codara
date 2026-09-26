@@ -38,13 +38,15 @@ for (const v of VARIANTS) {
   const flavor = v.script.includes('online') ? 'online' : 'offline';
   const mode = v.perUser ? 'per-user' : 'admin';
   const out = path.join(nsisDir, '..', 'dist', `codara-0.1.0-${mode}-${flavor}.exe`);
-  if (fs.existsSync(out)) {
-    const size = fs.statSync(out).size;
-    if (size > v.maxBytes) {
-      throw new Error(`体积超预算：${path.basename(out)} ${size} > ${v.maxBytes}`);
-    }
-    produced.push({ file: out, size });
+  // 产物缺失必须硬失败：原实现静默跳过，导致「4 件产物里的安装器实际为空包」也能 CI 绿
+  if (!fs.existsSync(out)) {
+    throw new Error(`makensis 未产出预期文件：${out}`);
   }
+  const size = fs.statSync(out).size;
+  if (size > v.maxBytes) {
+    throw new Error(`体积超预算：${path.basename(out)} ${size} > ${v.maxBytes}`);
+  }
+  produced.push({ file: out, size });
 }
 
 console.log('build-installer done:');

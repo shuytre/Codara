@@ -14,6 +14,9 @@
 !include "FileFunc.nsh"
 !include "MUI2.nsh"
 !include "x64.nsh"
+; nsDialogs 不会被 MUI2.nsh 自动引入：缺这一行时下面的 nsDialogs::Create 与
+; ${NSD_*} 宏全部未定义，makensis 直接编译失败（自定义 KB 检测页/选项页依赖它）
+!include "nsDialogs.nsh"
 
 !define APP_NAME      "Codara"
 !define APP_PUBLISHER "Codara Team"
@@ -93,7 +96,7 @@ Function PreInstallBackup
   IfFileExists "$APPDATA\${APP_NAME}\settings.json" 0 no_backup
     DetailPrint "检测到旧版数据目录，执行升级前备份…"
     CreateDirectory "$APPDATA\${APP_NAME}.bak-${APP_VERSION}"
-    CopyFiles /SILENT "$APPDATA\${APP_NAME}\*.*" "$APPDATA\${APP_NAME}.bak-${APP_VERSION}\"
+    CopyFiles /SILENT "$APPDATA\${APP_NAME}\*.*" "$APPDATA\${APP_NAME}.bak-${APP_VERSION}\\"
     DetailPrint "备份完成：$APPDATA\${APP_NAME}.bak-${APP_VERSION}（升级失败可回退）"
   no_backup:
 FunctionEnd
