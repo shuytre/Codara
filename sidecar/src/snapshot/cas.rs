@@ -21,8 +21,14 @@ impl CasStore {
         CasStore { root }
     }
 
-    fn blob_path(&self, hash: &str) -> PathBuf {
-        self.root.join("blobs").join(&hash[..2]).join(hash)
+    /// blob 路径。hash 来自磁盘上的 manifest（可被篡改/跨机拷贝），
+    /// 必须校验长度与字符集：原实现直接 &hash[..2]，空串或短串会 panic
+    /// 「byte index 2 is out of range」→ sidecar 整个进程退出。
+    fn blob_path(&self, hash: &str) -> Option<PathBuf> {
+        if hash.len() < 2 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(self.root.join("blobs").join(&hash[..2]).join(hash))
     }
 
     fn manifest_path(&self, snap_id: &str) -> PathBuf {
@@ -39,7 +45,10 @@ impl CasStore {
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             let hash = hex::encode(hasher.finalize());
-            let bp = self.blob_path(&hash);
+            let bp = match self.blob_path(&hash) {
+                Some(p) => p,
+                None => return Envelope::err(error::INTERNAL, "invalid blob hash"),
+            };
             if !bp.exists() {
                 if let Some(parent) = bp.parent() {
                     let _ = fs::create_dir_all(parent);
@@ -94,7 +103,15 @@ impl CasStore {
         Envelope::ok(json!({ "snapshots": snaps }))
     }
 
-    pub fn restore(&mut self, snap_id: &str, single_file: Option<&str>) -> Envelope {
+    /// `workspace_root` 用于校验恢复目标：manifest 是磁盘文件（可被篡改/跨机拷贝），
+    /// 其中的路径不应能把 blob 内容写到工作区之外。未初始化工作区时退化为不校验，
+    /// 保持与既有单测/离线用法一致。
+    pub fn restore(
+        &mut self,
+        snap_id: &str,
+        single_file: Option<&str>,
+        workspace_root: Option<&Path>,
+    ) -> Envelope {
         let mp = self.manifest_path(snap_id);
         let content = match fs::read_to_string(&mp) {
             Ok(c) => c,
@@ -111,10 +128,31 @@ impl CasStore {
                     }
                 }
                 let hash = meta.get("hash").and_then(|h| h.as_str()).unwrap_or("");
-                let bp = self.blob_path(hash);
+                let bp = match self.blob_path(hash) {
+                    Some(p) => p,
+                    None => {
+                        return Envelope::err(error::SNAPSHOT_NOT_FOUND, format!("invalid blob hash: {}", hash))
+                    }
+                };
+                // 恢复目标直接取自 manifest（磁盘文件，可被改写）：
+                // 规范化后必须仍落在工作区内，否则拒绝（防止把 blob 写到工作区之外）。
+                let target = PathBuf::from(path);
+                if let Some(root) = workspace_root {
+                    let resolved = if target.is_absolute() {
+                        crate::state::normalize(&target)
+                    } else {
+                        crate::state::normalize(&root.join(&target))
+                    };
+                    if !resolved.starts_with(root) {
+                        return Envelope::err(
+                            error::RESTORE_CONFLICT,
+                            format!("refuse to restore outside workspace: {}", path),
+                        );
+                    }
+                }
                 match fs::read(&bp) {
                     Ok(bytes) => {
-                        if let Err(e) = fs::write(path, &bytes) {
+                        if let Err(e) = fs::write(target, &bytes) {
                             return Envelope::err(error::RESTORE_CONFLICT, format!("restore {} failed: {}", path, e));
                         }
                         restored.push(path.clone());
