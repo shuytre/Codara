@@ -177,23 +177,34 @@ fn glob_match_any(path: &Path, globs: &[String]) -> bool {
 }
 
 /// 极简 glob：* 任意串、? 单字符
+///
+/// 用双指针线性算法（O(n·m)）实现。原实现是「遇到 * 就递归枚举切分点」，
+/// k 个 `*` 的复杂度是 O(n^k)：glob `*a*a*a*a*a*a*a*a*a*a*b` 配 40 字符路径
+/// 需要数十亿次递归，sidecar 单线程主线程直接挂死，一条请求即可 DoS。
 fn simple_glob(s: &str, pat: &str) -> bool {
-    fn inner(s: &[u8], p: &[u8]) -> bool {
-        if p.is_empty() {
-            return s.is_empty();
-        }
-        if p[0] == b'*' {
-            for i in 0..=s.len() {
-                if inner(&s[i..], &p[1..]) {
-                    return true;
-                }
-            }
-            false
-        } else if !s.is_empty() && (p[0] == b'?' || p[0] == s[0]) {
-            inner(&s[1..], &p[1..])
+    let (sb, pb) = (s.as_bytes(), pat.as_bytes());
+    let (mut i, mut j) = (0usize, 0usize);
+    // star：最近一个 `*` 在 pattern 中的位置；si：该 `*` 当前尝试匹配到的 s 下标
+    let (mut star, mut si) = (None::<usize>, 0usize);
+    while i < sb.len() {
+        if j < pb.len() && (pb[j] == b'?' || pb[j] == sb[i]) {
+            i += 1;
+            j += 1;
+        } else if j < pb.len() && pb[j] == b'*' {
+            star = Some(j);
+            si = i;
+            j += 1;
+        } else if let Some(st) = star {
+            j = st + 1;
+            si += 1;
+            i = si;
         } else {
-            false
+            return false;
         }
     }
-    inner(s.as_bytes(), pat.as_bytes())
+    // 尾部剩余的 `*` 可以匹配空串
+    while j < pb.len() && pb[j] == b'*' {
+        j += 1;
+    }
+    j == pb.len()
 }

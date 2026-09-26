@@ -87,6 +87,24 @@ pub fn term_exec(state: &mut AppState, params: Value) -> Envelope {
     if !v.ok {
         return Envelope::err_with(v.code, v.message, json!({ "command": command }));
     }
+    // 高危命令必须有放行凭据：此前 high_risk 只是回显给调用方的布尔值，
+    // sidecar 侧没有任何门禁 —— 网关一旦放行（或被绕过）就直接执行 rm -rf / format。
+    // 现在要求携带 approvalToken（人工审批通过或 Goal 预授权生成）。
+    if v.high_risk {
+        let token_ok = params
+            .get("approvalToken")
+            .and_then(|v| v.as_str())
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
+        let flag_ok = params.get("approved").and_then(|v| v.as_bool()) == Some(true);
+        if !token_ok && !flag_ok {
+            return Envelope::err_with(
+                error::CMD_REJECTED,
+                "high-risk command requires approval token",
+                json!({ "command": command, "risk": "high" }),
+            );
+        }
+    }
 
     let (session_id, cwd) = match params.get("sessionId").and_then(|v| v.as_str()) {
         Some(id) => {
