@@ -56,7 +56,8 @@ export class ApprovalGateway {
       void this.sidecar
         .call('audit.note', { event: 'goal.preauth.pass', tool, risk: this.riskFor(tool, params) })
         .catch(() => undefined);
-      return { allowed: true };
+      // 带上放行标记：sidecar 侧用它在执行前复核审批状态，避免「网关批准 ≠ 执行放行」
+      return { allowed: true, approvalToken: 'goal-preauth' };
     }
     const token = crypto.randomUUID();
     const card: ApprovalCard = {

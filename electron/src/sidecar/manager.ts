@@ -22,6 +22,9 @@ export class SidecarManager extends EventEmitter {
   private readonly binaryCandidates: string[];
   private appDataDir: string;
   private restarting = false;
+  /** 最近一次 initialize 的工作区根；崩溃重启后必须用它重新 initialize，
+   *  否则新进程 workspace_root 为空，所有工具调用都会返回 INVALID_REQUEST。 */
+  private workspaceRoot?: string;
 
   constructor(userDataDir: string) {
     super();
@@ -48,12 +51,23 @@ export class SidecarManager extends EventEmitter {
       logger.warn('sidecar exited', { code });
       this.rejectAllPending(new Error(`sidecar exited with ${code}`));
       if (!this.restarting && !this.stopped) {
-        // 崩溃自动重启（一次）
+        // 崩溃自动重启（一次）。必须 await 并 catch：
+        // 原实现 .then() 无 catch，start() 失败会变成 unhandled rejection 且
+        // restarting 永久为 true，此后任何崩溃都不再重启。
+        // 重启后还要重新 initialize，否则新进程没有 workspaceRoot，工具全线报废。
         this.restarting = true;
         setTimeout(() => {
-          void this.start().then(() => {
-            this.restarting = false;
-          });
+          void (async () => {
+            try {
+              await this.start();
+              await this.initialize(this.workspaceRoot);
+              logger.info('sidecar restarted and re-initialized');
+            } catch (err) {
+              logger.error('sidecar restart failed', err);
+            } finally {
+              this.restarting = false;
+            }
+          })();
         }, 500);
       }
     });
@@ -107,6 +121,7 @@ export class SidecarManager extends EventEmitter {
 
   /** initialize：工作区 + appDataDir 传递给 sidecar */
   async initialize(workspaceRoot?: string): Promise<Envelope> {
+    if (workspaceRoot) this.workspaceRoot = workspaceRoot;
     return this.call('initialize', {
       workspaceRoot: workspaceRoot || undefined,
       appDataDir: path.join(this.appDataDir, 'workspace-meta'),
@@ -115,7 +130,6 @@ export class SidecarManager extends EventEmitter {
   }
 
   async setWorkspace(workspaceRoot: string): Promise<Envelope> {
-    this.appDataDir = this.appDataDir;
     return this.initialize(workspaceRoot);
   }
 
