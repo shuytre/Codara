@@ -13,7 +13,7 @@ pub const DAY_MS: u128 = 86_400_000;
 fn day_string(epoch_ms: u128) -> String {
     let days = epoch_ms / DAY_MS;
     // 简化：以 epoch 天数命名 + UTC 换算
-    let mut z = days as i64 + 719_468;
+    let z = days as i64 + 719_468;
     let era = z / 146_097;
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
@@ -22,7 +22,9 @@ fn day_string(epoch_ms: u128) -> String {
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    z = y - if m <= 2 { 1 } else { 0 };
+    // 1/2 月属于上一"历年"，年份要 +1。写成 `-` 会让 1、2 月的日志文件名整体少 2 年
+    // （epoch day 0 会输出 1968-01-01，正确值 1970-01-01），跨年轮转与按天检索全乱。
+    let z = y + if m <= 2 { 1 } else { 0 };
     format!("{:04}{:02}{:02}", z, m, d)
 }
 

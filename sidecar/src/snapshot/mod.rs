@@ -83,7 +83,11 @@ pub fn snap_restore(state: &mut AppState, params: Value) -> Envelope {
         gitbranch::restore(state, &snapshot_id, single_file.as_deref())
     } else {
         match state.cas.lock().unwrap().as_mut() {
-            Some(cas) => cas.restore(&snapshot_id, single_file.as_deref()),
+            Some(cas) => cas.restore(
+                &snapshot_id,
+                single_file.as_deref(),
+                state.workspace_root.as_deref(),
+            ),
             None => Envelope::err(error::SNAPSHOT_NOT_FOUND, "no snapshot store"),
         }
     }
