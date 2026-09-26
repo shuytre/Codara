@@ -36,6 +36,7 @@ const api = {
   // M4：Goal 预授权 + 崩溃恢复
   goalPreauthorize: (payload: { confirmWorkspaceWrites: boolean; confirmWhitelistCommands: boolean; confirmBudget: boolean }) =>
     ipcRenderer.invoke(IPC.goalPreauthorize, payload),
+  recoveryPending: () => ipcRenderer.invoke(IPC.recoveryPending),
   recoveryResolve: (payload: { action: 'resume' | 'dismiss'; names: string[] }) =>
     ipcRenderer.invoke(IPC.recoveryResolve, payload),
   // M5：记忆体系 + 代码索引

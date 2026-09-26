@@ -37,6 +37,7 @@ export const IPC = {
   // Goal 预授权与崩溃恢复（M4）
   goalPreauthorize: 'goal:preauthorize', // renderer → main：用户勾选确认预授权
   recoveryNeeded: 'recovery:needed', // main → renderer：启动检测到过期锁
+  recoveryPending: 'recovery:pending', // renderer → main：主动拉取待恢复锁（事件早于订阅会丢，故用 pull）
   recoveryResolve: 'recovery:resolve', // renderer → main：恢复 / 忽略
   // 记忆体系（M5，规格 7.6）
   memoryLoad: 'memory:load', // 返回全局/项目记忆正文与导入标记
@@ -178,7 +179,7 @@ export interface MemoryLoadResult {
   importable: string[]; // 检测到的可导入源（相对路径）
 }
 
-/** memory:save 请求体（可视化记忆编辑器） */
+/** memory:save 请求体（M5） */
 export interface MemorySavePayload {
   scope: 'global' | 'project';
   content: string; // 单文件 8KB 上限（token 膨胀防护）
