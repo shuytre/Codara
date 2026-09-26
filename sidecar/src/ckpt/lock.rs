@@ -19,38 +19,53 @@ pub fn lock_acquire(state: &mut AppState, params: Value) -> Envelope {
     let ttl = params.get("ttlMs").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_TTL_MS);
     let owner = params.get("owner").and_then(|v| v.as_str()).unwrap_or("default").to_string();
     let p = lock_path(state, &name);
-
-    if p.exists() {
-        if let Ok(content) = std::fs::read_to_string(&p) {
-            if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                let ts = v.get("heartbeat").and_then(|h| h.as_u64()).unwrap_or(0);
-                let now = now_ms();
-                if now.saturating_sub(ts) < ttl {
-                    return Envelope::err_with(
-                        error::LOCK_HELD,
-                        format!("lock held: {}", name),
-                        json!({ "owner": v.get("owner"), "heartbeatAgeMs": now - ts }),
-                    );
-                }
-                // 过期锁：标记 stale，由调用方决定恢复/终止
-                return Envelope::err_with(
-                    error::LOCK_STALE,
-                    format!("stale lock found: {}", name),
-                    json!({ "owner": v.get("owner"), "heartbeatAgeMs": now.saturating_sub(ts) }),
-                );
-            }
-        }
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-
     let body = json!({
         "name": name,
         "owner": owner,
         "heartbeat": now_ms(),
         "pid": std::process::id(),
     });
-    if let Some(parent) = p.parent() {
-        let _ = std::fs::create_dir_all(parent);
+
+    // 原子占位：create_new 在文件已存在时失败，避免「先 exists 再 write」的 TOCTOU
+    // ——两个进程可以同时通过 exists 检查，最终双双认为自己拿到了锁。
+    {
+        use std::io::Write;
+        let fresh = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)
+            .map(|mut f| f.write_all(body.to_string().as_bytes()).is_ok())
+            .unwrap_or(false);
+        if fresh {
+            return Envelope::ok(json!({ "acquired": true, "name": name }));
+        }
     }
+
+    // 已存在：判定被占用还是已过期
+    if let Ok(content) = std::fs::read_to_string(&p) {
+        if let Ok(v) = serde_json::from_str::<Value>(&content) {
+            let ts = v.get("heartbeat").and_then(|h| h.as_u64()).unwrap_or(0);
+            let now = now_ms();
+            if now.saturating_sub(ts) < ttl {
+                return Envelope::err_with(
+                    error::LOCK_HELD,
+                    format!("lock held: {}", name),
+                    json!({ "owner": v.get("owner"), "heartbeatAgeMs": now.saturating_sub(ts) }),
+                );
+            }
+            // 过期锁：标记 stale，由调用方决定恢复/终止
+            return Envelope::err_with(
+                error::LOCK_STALE,
+                format!("stale lock found: {}", name),
+                json!({ "owner": v.get("owner"), "heartbeatAgeMs": now.saturating_sub(ts) }),
+            );
+        }
+    }
+
+    // 锁文件存在但无法解析（损坏）：视为可抢占，覆盖重建
     if std::fs::write(&p, body.to_string()).is_err() {
         return Envelope::err(error::INTERNAL, "cannot write lock file");
     }
