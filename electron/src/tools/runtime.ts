@@ -2,6 +2,7 @@
 import {
   CrewRole,
   Envelope,
+  ErrorCode,
   GitParams,
   ReadParams,
   SearchParams,
@@ -327,17 +328,28 @@ export class ToolRuntime {
         // 写前预快照（fs.patch 成功后 sidecar 不自动快照，主进程编排）
         await this.sidecar.call('snap.create', { paths: [norm.path], label: 'pre-patch', taskId: 'adhoc' }).catch(() => undefined);
         env = await this.sidecar.call('fs.patch', norm);
-        // 自愈：模型常带过期 baselineHash（或先 create 后又带 hash），
-        // 去掉 hash 重试一次；仍失败才把错误回注模型。
-        if (!env.ok && norm.baselineHash) {
-          const { baselineHash: _drop, ...retry } = norm;
-          env = await this.sidecar.call('fs.patch', retry as WriteParams);
+        // 自愈：模型常带过期 baselineHash。
+        // 仅对 1002（基线哈希冲突）自愈，且必须 fs.read 重读拿到最新 hash 后重放；
+        // 不能「丢掉 hash 重试」——sidecar 在缺 hash 时完全不做冲突检查，
+        // 那等于绕过并发写保护，会静默拍平其他实例/用户的并发改动。
+        // 1001 越界、1005 锚点未命中等错误一律不重试（重试只会得到同样结果）。
+        if (!env.ok && norm.baselineHash && env.error?.code === ErrorCode.BASELINE_MISMATCH) {
+          const fresh = await this.sidecar.call('fs.read', { path: norm.path });
+          const freshHash = (fresh.data as { baselineHash?: string } | null | undefined)?.baselineHash;
+          if (fresh.ok && typeof freshHash === 'string' && freshHash.length > 0) {
+            env = await this.sidecar.call('fs.patch', { ...norm, baselineHash: freshHash });
+          }
         }
         break;
       }
       case 'terminal': {
         const p = params as TerminalParams;
-        env = await this.sidecar.call('term.exec', p);
+        // 把网关的审批令牌透传给 sidecar：高危命令（rm -rf / format / reg add ...）
+        // 在 sidecar 侧必须有放行凭据才执行，否则网关批准不等于实际放行。
+        env = await this.sidecar.call('term.exec', {
+          ...(p as unknown as Record<string, unknown>),
+          ...(gate.approvalToken ? { approvalToken: gate.approvalToken } : {}),
+        });
         break;
       }
       case 'git': {
@@ -521,11 +533,19 @@ function roleTools(role: CrewRole): Set<string> {
   return new Set(ROLE_DEFS[role]?.tools ?? []);
 }
 
-/** 参数摘要（审计与卡片展示用，截断长文本） */
+/** 参数摘要（审计与卡片展示用，截断长文本）
+ * 注意：在任意字符位置切断 JSON 后拼接引号几乎必然不是合法 JSON，
+ * 曾导致 JSON.parse 抛错 → 工具结果被误判为失败（文件其实已写成功）。
+ * 因此必须 try/catch 兜底，失败时退化为带 __summary 的纯文本摘要。
+ */
 export function summarize(params: unknown): unknown {
   const s = JSON.stringify(params);
   if (s && s.length > 500) {
-    return JSON.parse(s.slice(0, 500) + '"…"');
+    try {
+      return JSON.parse(s.slice(0, 500) + '"…"');
+    } catch {
+      return { __summary: s.slice(0, 500) + '…' };
+    }
   }
   return params;
 }
