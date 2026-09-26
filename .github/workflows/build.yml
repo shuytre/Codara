@@ -5,9 +5,17 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# 连续 push 时取消在跑的旧任务：避免两个 90 分钟 job 抢同一份缓存
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   # ---------- Job 1：Linux 全量验证（类型检查 + Rust 单测 + 主/集成测试） ----------
-  # 与 Windows 构建并行：Linux 跑测试便宜且快，Windows 只负责产出 Win7 产物。
+  # 与 Windows 构建串行依赖：Linux 跑测试便宜且快，测试不过就不产出发布产物。
   test:
     name: Test (ubuntu)
     runs-on: ubuntu-latest
@@ -24,16 +32,21 @@ jobs:
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '22.13'
-          cache: 'pnpm'
+          node-version: '22.13.1'
+          cache: 'pnpm'   # key 含 pnpm-lock.yaml 哈希，frozen-lockfile 不改写 → 稳定命中
 
-      - name: Setup Rust 1.77.2（读取 sidecar/rust-toolchain.toml 自动锁定）
+      # 只装工具链，缓存交给下面的 Swatinem/rust-cache：
+      # 该 action 内置缓存默认按仓库根找 Cargo.toml（本仓根没有），会与显式缓存重复 restore/save
+      - name: Setup Rust 1.77.2（读取 rust-toolchain.toml 自动锁定）
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: sidecar
+          cache-on-failure: true   # 依赖变更后测试失败也要落盘，否则下次全量重编
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -55,6 +68,7 @@ jobs:
 
   # ---------- Job 2：Windows 构建 Win7 目标产物 ----------
   build:
+    needs: test                # 测试不通过则不产出发布产物（门禁）
     runs-on: windows-latest
     timeout-minutes: 90
 
@@ -70,7 +84,7 @@ jobs:
       - name: 安装 Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.13.1'
           cache: 'pnpm'
 
       - name: 安装 Rust 1.77.2
@@ -81,6 +95,17 @@ jobs:
         with:
           workspaces: sidecar
           cache-on-failure: true
+
+      # Electron 22.3.27 运行时 zip 约 90MB，且 postinstall 还会再下一份：
+      # 不缓存的话每次构建至少两次外网下载，GitHub 限流即让 90 分钟 job 白跑。
+      - name: 缓存 Electron 二进制
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/.cache/electron
+            ${{ runner.temp }}/electron-22.3.27
+          key: electron-${{ runner.os }}-22.3.27-v1
 
       - name: 安装 NSIS
         run: choco install nsis -y --no-progress
@@ -103,34 +128,64 @@ jobs:
             Get-ChildItem "C:\Program Files (x86)", "C:\Program Files", "$env:ProgramData\chocolatey\lib" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "nsis" } | ForEach-Object { Write-Host "NSIS-like dir: $($_.FullName)" }
           }
 
+      - name: 校验 makensis（早失败好过后面晦涩报错）
+        shell: pwsh
+        run: makensis /VERSION
+
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
       - name: 构建（shared → sidecar → main → renderer）
         run: pnpm build
 
-      # 下面的测试步骤为了让你先拿到安装包，暂时注释掉了。
-      # 等拿到包后，你可以去掉 # 重新开启。
+      # 下面的测试步骤由 Job 1（ubuntu）全量覆盖，此处只负责产出 Win7 产物以节省 runner 时间。
       # - name: 类型检查
       #   run: pnpm -r typecheck
       # - name: 测试 - Rust sidecar
       #   run: pnpm test:sidecar
-      # - name: 测试 - contract / main / renderer
-      #   run: |
-      #     pnpm test:contract
-      #     pnpm test:main
-      #     pnpm test:renderer
-      # - name: 测试 - 集成
+      # - name: 集成测试
       #   run: pnpm test:integration
 
-      - name: 准备离线安装器 payload
-        shell: bash
+      # ---- 先组装 portable stage，再原样作为 NSIS payload ----
+      # 之前 payload 是 shared-dist/electron-dist/renderer-dist/bin 四份平铺，
+      # 既没有 Codara.exe（Electron 运行时从未进 payload），resources 层级也与
+      # manager.ts（resourcesPath/bin/<triple>）和 main.ts（../../renderer/dist）不匹配
+      # → 装完的快捷方式指向不存在的文件。统一成 stage 布局后两处解析路径天然自洽。
+      - name: 组装 stage（Electron + app + renderer + sidecar）
+        shell: pwsh
         run: |
-          mkdir -p installer/nsis/payload
-          cp -r shared/dist   installer/nsis/payload/shared-dist
-          cp -r electron/dist installer/nsis/payload/electron-dist
-          cp -r renderer/dist installer/nsis/payload/renderer-dist
-          cp -r resources/bin installer/nsis/payload/bin
+          $ProgressPreference = 'SilentlyContinue'
+          $stage = "$env:RUNNER_TEMP\portable\Codara"
+          $ecache = "$env:RUNNER_TEMP\electron-22.3.27"
+          New-Item -ItemType Directory -Force -Path $ecache, "$stage\resources\app\dist", "$stage\resources\bin\x86_64-pc-windows-msvc" | Out-Null
+          # Electron 22.3.27：最后一个支持 Win7/8/8.1 的版本
+          $zip = Join-Path $ecache 'electron.zip'
+          if (-not (Test-Path $zip)) {
+            curl.exe -L --retry 5 --retry-delay 2 -o $zip "https://github.com/electron/electron/releases/download/v22.3.27/electron-v22.3.27-win32-x64.zip"
+          }
+          Expand-Archive $zip $stage -Force
+          Rename-Item "$stage\electron.exe" "Codara.exe"
+          # 主进程 app（esbuild 自包含 bundle，main -> dist/main.js）
+          Copy-Item electron\dist\* "$stage\resources\app\dist\" -Force
+          @'
+          {
+            "name": "codara",
+            "productName": "Codara",
+            "version": "0.1.0",
+            "main": "dist/main.js"
+          }
+          '@ | Set-Content -Encoding utf8 "$stage\resources\app\package.json"
+          # renderer（main.ts 按 app/dist/../../renderer/dist 解析 → 必须保留 dist 层级：
+          # 产物应为 resources\renderer\dist\index.html）
+          New-Item -ItemType Directory -Force -Path "$stage\resources\renderer\dist" | Out-Null
+          Copy-Item renderer\dist\* "$stage\resources\renderer\dist\" -Recurse -Force
+          # sidecar（manager.ts 按 process.resourcesPath/bin/<triple>/ 解析）
+          Copy-Item resources\bin\x86_64-pc-windows-msvc\codara-sidecar.exe "$stage\resources\bin\x86_64-pc-windows-msvc\" -Force
+          # 许可证随安装目录分发（规格 7.10）
+          node installer\scripts\gen-notices.mjs . "$stage\resources\NOTICES.txt"
+          # payload ≡ portable 布局
+          New-Item -ItemType Directory -Force -Path installer\nsis\payload | Out-Null
+          Copy-Item "$stage\*" installer\nsis\payload\ -Recurse -Force
 
       - name: 打包 NSIS 安装器
         shell: pwsh
@@ -151,6 +206,7 @@ jobs:
         with:
           name: codara-sidecar-win7-x64
           path: resources/bin/x86_64-pc-windows-msvc/codara-sidecar.exe
+          if-no-files-found: error
 
       - name: 上传产物 - 应用构建输出
         uses: actions/upload-artifact@v4
@@ -160,40 +216,20 @@ jobs:
             shared/dist/
             electron/dist/
             renderer/dist/
+          if-no-files-found: error
 
       - name: 上传产物 - NSIS 安装器
         uses: actions/upload-artifact@v4
         with:
           name: codara-installers
           path: installer/dist/*.exe
+          if-no-files-found: error
 
-      - name: 组装便携完整包（Electron 运行时 + 应用 + sidecar）
+      - name: 打包便携完整包
         shell: pwsh
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          $stage = "$env:RUNNER_TEMP\portable\Codara"
-          New-Item -ItemType Directory -Force -Path "$stage\resources\app\dist", "$stage\resources\bin\x86_64-pc-windows-msvc" | Out-Null
-          # Electron 22.3.27：最后一个支持 Win7/8/8.1 的版本
-          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/electron/electron/releases/download/v22.3.27/electron-v22.3.27-win32-x64.zip" -OutFile "$env:RUNNER_TEMP\electron.zip"
-          Expand-Archive "$env:RUNNER_TEMP\electron.zip" $stage -Force
-          Rename-Item "$stage\electron.exe" "Codara.exe"
-          # 主进程 app（esbuild 自包含 bundle，main -> dist/main.js）
-          Copy-Item electron\dist\* "$stage\resources\app\dist\" -Force
-          @'
-          {
-            "name": "codara",
-            "productName": "Codara",
-            "version": "0.1.0",
-            "main": "dist/main.js"
-          }
-          '@ | Set-Content -Encoding utf8 "$stage\resources\app\package.json"
-          # renderer（main.ts 按 app/dist/../../renderer/dist 解析 → 必须保留 dist 层级：
-          # 产物应为 resources\renderer\dist\index.html）
-          New-Item -ItemType Directory -Force -Path "$stage\resources\renderer\dist" | Out-Null
-          Copy-Item renderer\dist\* "$stage\resources\renderer\dist\" -Recurse -Force
-          # sidecar（manager.ts 按 process.resourcesPath/bin/<triple>/ 解析）
-          Copy-Item resources\bin\x86_64-pc-windows-msvc\codara-sidecar.exe "$stage\resources\bin\x86_64-pc-windows-msvc\" -Force
-          Compress-Archive -Path "$stage\*" -DestinationPath "$env:RUNNER_TEMP\Codara-portable-win7-x64.zip" -Force
+          Compress-Archive -Path "$env:RUNNER_TEMP\portable\Codara\*" -DestinationPath "$env:RUNNER_TEMP\Codara-portable-win7-x64.zip" -Force
           Write-Host "portable zip bytes:" (Get-Item "$env:RUNNER_TEMP\Codara-portable-win7-x64.zip").Length
 
       - name: 上传产物 - 便携完整包
