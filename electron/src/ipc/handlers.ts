@@ -178,32 +178,38 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     return dir;
   });
 
+  // ---------- 审批等待表（须在 chatSend 之前定义） ----------
+  // 审批回调只能在注册期绑定一次：原实现放在 chatSend 内部，每次发送都会 push 一个新的
+  // listener，导致第 N 次对话需要连点 N 次「批准」，且旧 listener 的 Promise 永不结算。
+  const approvalWaiters = new Map<string, (approved: boolean) => void>();
+  gateway.onApproval(async (card) => {
+    const win = mainWindowRef();
+    if (win && !win.isDestroyed()) {
+      win.webContents.send(IPC.approvalRequest, { card });
+    }
+    return new Promise<boolean>((resolve) => {
+      approvalWaiters.set(card.approvalToken, resolve);
+    });
+  });
+
   // ---------- 对话 ----------
   ipcMain.handle(IPC.chatSend, async (event, payload: unknown): Promise<boolean> => {
     const p = ChatSendSchema.parse(payload);
     const win = mainWindowRef();
     if (!win) return false;
-
+    // 流式过程中窗口可能已被关闭：此后任何 webContents.send 都会抛
+    // 「Object has been destroyed」并穿透为 uncaughtException 杀掉主进程。
+    const alive = () => !win.isDestroyed();
     const sendCard = (card: Card) => {
-      win.webContents.send(IPC.chatEvent, { kind: 'card', card });
+      if (alive()) win.webContents.send(IPC.chatEvent, { kind: 'card', card });
     };
-    const sendApproval = (card: ApprovalCard) => {
-      win.webContents.send(IPC.approvalRequest, { card });
-    };
-    // 审批 → 渲染层
-    gateway.onApproval(async (card) => {
-      sendApproval(card);
-      return new Promise<boolean>((resolve) => {
-        approvalWaiters.set(card.approvalToken, resolve);
-      });
-    });
 
     // 流式增量（节流 50ms 批量推送）
     let deltaBuf = '';
     let deltaTimer: NodeJS.Timeout | null = null;
     const flushDelta = () => {
       if (deltaBuf) {
-        win.webContents.send(IPC.chatEvent, { kind: 'delta', text: deltaBuf });
+        if (alive()) win.webContents.send(IPC.chatEvent, { kind: 'delta', text: deltaBuf });
         deltaBuf = '';
       }
       deltaTimer = null;
@@ -218,6 +224,7 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
       },
       onDone: (full) => {
         if (deltaTimer) flushDelta();
+        if (!alive()) return;
         win.webContents.send(IPC.chatEvent, {
           kind: 'done',
           text: full,
@@ -225,7 +232,7 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
         });
       },
       onBudgetSuspended: () => {
-        win.webContents.send(IPC.budgetSuspended, budget.snapshot());
+        if (alive()) win.webContents.send(IPC.budgetSuspended, budget.snapshot());
       },
     });
     return true;
@@ -235,6 +242,11 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     deps.loop.abort();
     // 「停」即回到逐次审批（规格 4.7）
     gateway.setGoalPreAuthorized(false);
+    // 中止时结算所有挂起的审批 Promise，否则工具调用永远卡在等待，且 Map 无界增长
+    for (const [token, resolve] of approvalWaiters) {
+      approvalWaiters.delete(token);
+      resolve(false);
+    }
     return true;
   });
 
@@ -258,49 +270,63 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   });
 
   // 切换会话：绑定目标会话并恢复历史消息为模型上下文（左栏对话列表点击）
-  ipcMain.handle(IPC.chatSwitch, async (_e, payload: unknown): Promise<{ ok: boolean; error?: string }> => {
-    try {
-      const p = z.object({ sessionId: z.string().min(1) }).parse(payload);
-      deps.loop.abort();
-      deps.loop.reset();
-      deps.loop.attachMainSession(p.sessionId);
-      // 恢复历史（roleId=main 约定；失败不阻塞切换，仅失去模型上下文）
-      const hist = await sidecar.call('msg.list', { sessionId: p.sessionId, roleId: 'main', limit: 200 });
-      if (hist.ok) {
-        const rows = (hist.data as { messages?: Array<Record<string, unknown>> } | undefined)?.messages ?? [];
-        const history = rows
-          .map((r) => {
-            const role = String(r.role ?? 'assistant');
-            const raw = r.content;
-            let content = '';
-            if (typeof raw === 'string') {
-              try {
-                const parsed = JSON.parse(raw) as unknown;
-                content = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
-              } catch {
-                content = raw;
+  ipcMain.handle(
+    IPC.chatSwitch,
+    async (
+      _e,
+      payload: unknown,
+    ): Promise<{ ok: boolean; error?: string; messages?: Array<{ role: string; content: string }> }> => {
+      try {
+        const p = z.object({ sessionId: z.string().min(1) }).parse(payload);
+        deps.loop.abort();
+        deps.loop.reset();
+        deps.loop.attachMainSession(p.sessionId);
+        // 恢复历史（roleId=main 约定；失败不阻塞切换，仅失去模型上下文）
+        const hist = await sidecar.call('msg.list', { sessionId: p.sessionId, roleId: 'main', limit: 200 });
+        if (hist.ok) {
+          const rows = (hist.data as { messages?: Array<Record<string, unknown>> } | undefined)?.messages ?? [];
+          const history = rows
+            .map((r) => {
+              const role = String(r.role ?? 'assistant');
+              const raw = r.content;
+              let content = '';
+              if (typeof raw === 'string') {
+                try {
+                  const parsed = JSON.parse(raw) as unknown;
+                  content = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+                } catch {
+                  content = raw;
+                }
               }
-            }
-            const m: Record<string, unknown> = { role, content };
-            if (r.toolCallId) m.tool_call_id = r.toolCallId;
-            if (r.toolCalls) {
-              try {
-                m.tool_calls = JSON.parse(String(r.toolCalls));
-              } catch {
-                /* 忽略损坏行 */
+              const m: Record<string, unknown> = { role, content };
+              if (r.toolCallId) m.tool_call_id = r.toolCallId;
+              if (r.toolCalls) {
+                try {
+                  m.tool_calls = JSON.parse(String(r.toolCalls));
+                } catch {
+                  /* 忽略损坏行 */
+                }
               }
-            }
-            return m as never;
-          })
-          .filter((m) => Boolean((m as { content?: string }).content));
-        deps.loop.loadMessages(history);
+              return m;
+            })
+            // assistant 带 tool_calls 时 content 为 null，若按 content 过滤会留下孤立的
+            // role='tool' 消息，OpenAI 兼容接口会报 400（tool 消息必须有前置 tool_calls）。
+            .filter((m) => Boolean(m.content) || Array.isArray(m.tool_calls));
+          deps.loop.loadMessages(history as never[]);
+          // 回传渲染层用于重建对话流：否则左栏切换会话后中栏一片空白，用户以为历史丢了
+          return {
+            ok: true,
+            messages: history
+              .filter((m) => typeof m.content === 'string' && m.content.length > 0)
+              .map((m) => ({ role: String(m.role), content: String(m.content) })),
+          };
+        }
+        return { ok: true };
+      } catch (err) {
+        logger.warn('chat switch failed', err);
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
-      return { ok: true };
-    } catch (err) {
-      logger.warn('chat switch failed', err);
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
-  });
+    });
 
   // 主对话原点会话 id（启动时创建；chatNew 换会话不影响原点，左栏「主对话」回切用）
   ipcMain.handle(IPC.chatMainSession, async (): Promise<{ sessionId: string | null }> => {
@@ -316,8 +342,7 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     return all;
   });
 
-  // ---------- 审批 ----------
-  const approvalWaiters = new Map<string, (approved: boolean) => void>();
+  // ---------- 审批响应（等待表与 listener 已在「对话」段之前注册一次） ----------
   ipcMain.handle(IPC.approvalRespond, async (_e, payload: unknown): Promise<boolean> => {
     const p = ApprovalRespondSchema.parse(payload);
     const waiter = approvalWaiters.get(p.approvalToken);
