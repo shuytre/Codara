@@ -2,12 +2,15 @@
 import { Show, createResource } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
-import { usage } from '../../state/stores';
+import { setUsage, usage } from '../../state/stores';
 
 export function UsagePanel() {
   const b = bridge();
   const [, { refetch }] = createResource(async () => {
     const snap = await b.usageSnapshot();
+    // 必须写回 store：面板读的是 store，原实现丢了 resource 的第一个元素，
+    // 导致启动后到首次发送前用量面板恒为 0。
+    setUsage(snap);
     return snap;
   });
 

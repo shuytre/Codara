@@ -5,6 +5,7 @@ import { createSignal, For, Show } from 'solid-js';
 import { bridge } from '../../ipc/client';
 import {
   addConversation,
+  appendEntry,
   cards,
   chat,
   convs,
@@ -69,6 +70,16 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
       const r = await b.chatSwitch({ sessionId });
       if (!r?.ok) throw new Error(r?.error || '切换失败');
       clearStream();
+      // 把主进程回传的历史重建到中栏：否则切换会话后中栏一片空白，用户以为历史丢失
+      const history = (r as { messages?: Array<{ role: string; content: string }> }).messages ?? [];
+      for (const [i, m] of history.entries()) {
+        appendEntry({
+          id: `h-${sessionId}-${i}`,
+          role: (m.role === 'user' ? 'user' : m.role === 'system' ? 'system' : 'assistant') as never,
+          text: m.content,
+          createdAt: Date.now(),
+        });
+      }
       setActiveConversation(sessionId);
     } catch (err) {
       setUi({ toast: `切换会话失败：${err instanceof Error ? err.message : String(err)}` });
