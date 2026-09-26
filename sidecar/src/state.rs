@@ -1,5 +1,6 @@
 //! 全局状态：工作区、读缓存、终端会话、DB 连接、审计器、快照库。
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -67,6 +68,25 @@ impl AppState {
             return Err(crate::rpc::envelope::Envelope::err_with(
                 error::PATH_ESCAPED,
                 format!("path escapes workspace: {}", p),
+                serde_json::json!({ "path": p }),
+            ));
+        }
+        // 词法规范化只能挡住 `..` / 绝对路径 / UNC / `\\?\` 前缀，
+        // 挡不住符号链接与目录联接：Win7 上 `mklink /J link C:\Windows\System32`
+        // 不需要管理员权限，之后 fs.read/fs.patch 即可越权读写工作区外的文件。
+        // 因此必须再解析真实路径做二次校验（canonicalize 要求目标存在，
+        // 新建文件的场景退化为校验其父目录）。
+        let root_real = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        let real = fs::canonicalize(&norm).unwrap_or_else(|_| match norm.parent() {
+            Some(parent) => fs::canonicalize(parent)
+                .map(|pp| pp.join(norm.file_name().unwrap_or_default()))
+                .unwrap_or_else(|_| norm.clone()),
+            None => norm.clone(),
+        });
+        if !real.starts_with(&root_real) {
+            return Err(crate::rpc::envelope::Envelope::err_with(
+                error::PATH_ESCAPED,
+                format!("path escapes workspace (resolved via link): {}", p),
                 serde_json::json!({ "path": p }),
             ));
         }

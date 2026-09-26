@@ -82,6 +82,17 @@ fn key_path(app_data: &std::path::Path, name: &str) -> std::path::PathBuf {
     app_data.join("secrets").join(format!("{}.key", name))
 }
 
+/// 由外部输入构造文件名的通用白名单：禁止路径分隔符与 `..`，
+/// 只允许 [A-Za-z0-9_.-]。secret.name / ckpt.taskId 等一律先过这一关。
+pub fn is_safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
 fn secret_root() -> Option<(std::path::PathBuf,)> {
     // 依赖 initialize 的 appDataDir；由调用方传入 params.appDataDir
     None
@@ -104,6 +115,10 @@ pub fn secret_set(params: Value) -> Envelope {
         Some(a) => a,
         None => return missing_app_dir(),
     };
+    // name 直接拼进文件名，不做净化即可用 `../../..` 穿越到 appDataDir 之外任意写
+    if !is_safe_name(&name) {
+        return Envelope::err(crate::rpc::error::INVALID_PARAMS, "invalid secret name");
+    }
     match imp::protect(&value) {
         Ok(cipher) => {
             let dir = app_data.join("secrets");
@@ -128,6 +143,9 @@ pub fn secret_get(params: Value) -> Envelope {
         Some(a) => a,
         None => return missing_app_dir(),
     };
+    if !is_safe_name(&name) {
+        return Envelope::err(crate::rpc::error::INVALID_PARAMS, "invalid secret name");
+    }
     let p = key_path(&app_data, &name);
     match std::fs::read(&p) {
         Ok(cipher) => match imp::unprotect(&cipher) {
@@ -147,6 +165,9 @@ pub fn secret_delete(params: Value) -> Envelope {
         Some(a) => a,
         None => return missing_app_dir(),
     };
+    if !is_safe_name(&name) {
+        return Envelope::err(crate::rpc::error::INVALID_PARAMS, "invalid secret name");
+    }
     match std::fs::remove_file(key_path(&app_data, &name)) {
         Ok(_) => Envelope::ok(json!({ "name": name, "deleted": true })),
         Err(_) => Envelope::err(error::SECRET_NOT_FOUND, format!("secret not found: {}", name)),
