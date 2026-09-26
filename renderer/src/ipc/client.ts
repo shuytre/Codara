@@ -24,7 +24,7 @@ export interface CodaraBridge {
   chatSend(payload: ChatSendPayload): Promise<boolean>;
   chatAbort(): Promise<boolean>;
   chatNew(): Promise<{ ok: boolean; sessionId?: string; error?: string }>;
-  chatSwitch(payload: { sessionId: string }): Promise<{ ok: boolean; error?: string }>;
+  chatSwitch(payload: { sessionId: string }): Promise<{ ok: boolean; error?: string; messages?: Array<{ role: string; content: string }> }>;
   chatMainSession(): Promise<{ sessionId: string | null }>;
   approvalRespond(payload: ApprovalRespondPayload): Promise<boolean>;
   usageSnapshot(): Promise<UsageSnapshot>;
@@ -38,6 +38,7 @@ export interface CodaraBridge {
   crewStatus(): Promise<unknown>;
   // M4：Goal 预授权与崩溃恢复
   goalPreauthorize(payload: { confirmWorkspaceWrites: boolean; confirmWhitelistCommands: boolean; confirmBudget: boolean }): Promise<boolean>;
+  recoveryPending(): Promise<{ locks: Array<{ name: string; owner: string; heartbeat: number }> }>;
   recoveryResolve(payload: { action: 'resume' | 'dismiss'; names: string[] }): Promise<unknown>;
   // M5：记忆体系 + 代码索引
   memoryLoad(): Promise<MemoryLoadResult>;
@@ -110,7 +111,8 @@ export function bridge(): CodaraBridge {
     crewSpawn: async () => ({ instanceId: '' }),
     crewStatus: async () => ({}),
     goalPreauthorize: async () => false,
-    recoveryResolve: async () => ({}),
+    recoveryPending: async () => ({ locks: [] }),
+    recoveryResolve: async () => ({}) as unknown,
     memoryLoad: async () => ({
       global: '',
       project: '',

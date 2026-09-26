@@ -7,6 +7,14 @@ export function RecoveryBanner() {
   const b = bridge();
   const [locks, setLocks] = createSignal<Array<{ name: string; owner: string; heartbeat: number }> | null>(null);
   createEffect(() => {
+    // 主进程在窗口创建后立刻 send 的 recovery:needed 事件，早于本组件订阅（中间隔着
+    // App → createResource → MainLayout 的异步链），必然丢失。先主动 pull 一次补齐。
+    void b
+      .recoveryPending()
+      .then((r) => {
+        if (r?.locks?.length) setLocks(r.locks);
+      })
+      .catch(() => undefined);
     const off = b.onRecoveryNeeded((payload) => {
       setLocks((payload as { locks: Array<{ name: string; owner: string; heartbeat: number }> }).locks);
     });
