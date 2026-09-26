@@ -1,5 +1,5 @@
 // Codara 主进程入口：窗口生命周期、sidecar 托管、IPC 注册、恢复入口（M4）
-import { app, BrowserWindow, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu } from 'electron';
 import * as path from 'path';
 
 import { registerIpcHandlers } from './ipc/handlers';
@@ -12,9 +12,11 @@ import { ApprovalGateway } from './tools/gateway';
 import { ToolRuntime } from './tools/runtime';
 import { CrewScheduler } from './crew/scheduler';
 import { IPC } from '@codara/contract';
-import { logger } from './util/logger';
+import { logger, setLogDir } from './util/logger';
 
 let mainWindow: BrowserWindow | null = null;
+// 退出清理与崩溃重启都需要拿到 sidecar 实例，提升到模块级持有
+let sidecarRef: SidecarManager | null = null;
 
 // Win7 兼容：老显卡驱动 + Chromium 108 的 GPU 进程崩溃会导致白屏（窗口只有底色）
 // 统一禁用硬件加速走软件合成，稳定优先
@@ -51,6 +53,9 @@ async function onReady(): Promise<void> {
 
   const settings = new SettingsStore(userData);
   const sidecar = new SidecarManager(userData);
+  sidecarRef = sidecar;
+  // 日志落盘：未设置时 logger 只写 stdout（CODARA_DEBUG 才开），生产环境等于零日志
+  setLogDir(path.join(userData, 'logs'));
 
   // 引擎启动容错：sidecar 缺失/崩溃时仍创建窗口（UI 降级显示），
   // 避免 await 链抛错后 createWindow 永不执行 → 用户看到"点击无反应"
@@ -119,8 +124,18 @@ async function onReady(): Promise<void> {
 
   createWindow(settings);
 
+  // 渲染层的订阅发生在 SPA mount 之后（App → createResource → MainLayout → RecoveryBanner，
+  // 中间还隔着一次异步 IPC），此处立即 send 的事件必然被丢弃 → 崩溃恢复横幅永不显示。
+  // 改为「渲染层主动拉取」为主 + 加载完成后补发兜底。
+  ipcMain.handle(IPC.recoveryPending, async (): Promise<{ locks: typeof stale }> => ({ locks: stale }));
   if (stale.length > 0 && mainWindow) {
-    mainWindow.webContents.send(IPC.recoveryNeeded, { locks: stale });
+    const push = () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(IPC.recoveryNeeded, { locks: stale });
+      }
+    };
+    mainWindow.webContents.once('did-finish-load', () => setTimeout(push, 800));
+    setTimeout(push, 3000); // 慢启动兜底
   }
 }
 
@@ -175,7 +190,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
-  // 清理 sidecar 由 SidecarManager.dispose 处理
+  // 清理 sidecar：否则退出后残留孤儿子进程，下次启动抢不到单实例锁/端口
+  void sidecarRef?.dispose().catch(() => undefined);
 });
 
 export { mainWindow as MainWindowRef };
