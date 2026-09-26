@@ -151,12 +151,9 @@ export class AgentLoop {
           },
           (e) => {
             if (e.type === 'delta') cb.onDelta(e.text);
-            if (e.type === 'usage') {
-              const tripped = this.budget.record(e.promptTokens, e.completionTokens);
-              if (tripped) {
-                logger.warn('budget breaker tripped');
-              }
-            }
+            // 注意：这里的 usage 事件只做展示，不再记账。
+            // 原实现在流式回调与收尾处各 record 一次（厂商若每 chunk 带 usage 则 ×N），
+            // 导致 costLimitCNY 在真实消耗一半时误熔断，usage 库数据翻倍。
           },
           signal
         );
