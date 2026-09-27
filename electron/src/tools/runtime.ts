@@ -341,6 +341,25 @@ export class ToolRuntime {
       };
     }
 
+    // terminal 命令纪律预检（前置到审批之前）。
+    // 此前校验只在 sidecar 的 term.exec 里做，而它发生在**审批卡弹出之后**——用户点了
+    // 「批准」，命令仍会被同一条规则拒绝，审批卡变成一次无效交互（截图现象：卡上写着
+    // 「已批准」，工具流水里却是 ✗）。这里把同一套规则前移到主进程：非法命令根本不弹卡，
+    // 直接把「命中哪条规则、怎么改」回注给模型自纠，同时省掉一次无意义的用户打扰。
+    // 规则本体仍保留在 sidecar（它是最终防线，不放宽），这里只是提前告知。
+    if (tool === 'terminal') {
+      const cmdErr = precheckTerminalCommand(params);
+      if (cmdErr) {
+        return {
+          ok: false,
+          error: { code: ErrorCode.CMD_REJECTED, message: cmdErr },
+          tool,
+          params: summarize(params),
+          durationMs: Date.now() - started,
+        };
+      }
+    }
+
     // 权限网关：ask 级操作先审批
     const gate = await this.gateway.check(tool, params, mode);
     if (!gate.allowed) {
@@ -415,6 +434,14 @@ export class ToolRuntime {
           ...(p as unknown as Record<string, unknown>),
           ...(gate.approvalToken ? { approvalToken: gate.approvalToken } : {}),
         });
+        // 退出码优先（规格 3.3.4）：sidecar 对命令执行失败（exitCode≠0 / 超时 124）
+        // 仍返回 ok=true，失败信息只落在 data.exitCode/stderr 里。主进程此前只看 env.ok，
+        // 于是**命令彻底失败也被标成「完成」**——模型据此以为跑通了，基于错误前提继续，
+        // 产出「验证通过」式幻觉；用户看到的则是 terminal 时好时坏、状态不可信。
+        // 这里把退出码提升为工具层的业务失败：ok=false + 保留 data（stdout/stderr 仍在），
+        // 错误码复用 2002 TERM_TIMEOUT（超时）/ 3001 CMD_REJECTED（非零退出），
+        // 让卡片、审计、回注模型三处一致地看到「这条命令失败了」。
+        env = promoteTerminalExit(env);
         break;
       }
       case 'git': {
@@ -502,7 +529,7 @@ export function validateToolParams(tool: string, params: unknown): string | null
   if (params === null || params === undefined || typeof params !== 'object' || Array.isArray(params)) {
     return (
       `工具「${tool}」的参数必须是 JSON 对象，实际收到 ${describeType(params)}。` +
-      `请以 {\"必填参数\":\"值\"} 形式重新调用。`
+      `请以 {"必填参数":"值"} 形式重新调用。`
     );
   }
   const p = params as Record<string, unknown>;
@@ -681,6 +708,112 @@ function safePreview(v: unknown): string {
   } catch {
     return String(v);
   }
+}
+
+/** 与 sidecar `governance/cmd_rules.rs` 对齐的命令纪律参数（两侧必须同步修改）。
+ *  抽到常量是为了让「主进程预检」与「sidecar 终检」不会再次漂移——上一轮的 bug 正是
+ *  提示词教分号、sidecar 禁分号、长度门槛 200 又拦下一行式，三处互不知情。 */
+export const TERM_CMD_LIMIT = 2000; // 与 sidecar 的 CMD_OVERFLOW_BLOCKED 一致
+
+/**
+ * terminal 命令纪律预检：命中即返回可直接回注模型的错误说明，未命中返回 null。
+ * 覆盖 sidecar `validate_command` 的四条硬规则（平台无关的那部分）：
+ *  1. 空命令   2. 长度溢出   3. &&/|| 链式   4. 引号外分号链式
+ * 只做「能给出可自纠建议」的规则；PowerShell 子集、高危识别仍由 sidecar 判定。
+ */
+export function precheckTerminalCommand(params: unknown): string | null {
+  const cmd = (params as { command?: unknown } | null | undefined)?.command;
+  if (typeof cmd !== 'string') return null; // 缺参/类型错误已由 validateToolParams 拦截
+  const trimmed = cmd.trim();
+  if (!trimmed) return null; // 空命令由必填校验兜住
+
+  if (trimmed.length > TERM_CMD_LIMIT) {
+    return (
+      `terminal 命令过长（${trimmed.length} 字符，上限 ${TERM_CMD_LIMIT}）。` +
+      '请把逻辑写入 .ps1 脚本文件（先用 write 创建），再用 `powershell -NoProfile -File 脚本.ps1` 执行。'
+    );
+  }
+  if (trimmed.includes('&&') || trimmed.includes('||')) {
+    return (
+      'terminal 不接受 && / || 链式命令（每种 shell 语义不同，易产生不可预期结果）。' +
+      '请拆成多次 terminal 调用，或写成 .ps1 脚本后一次性执行。'
+    );
+  }
+  // 引号外分号 = 链式。注意引号内分号是合法内容（如 PowerShell 单引号字符串）。
+  if (hasUnquotedSemicolon(trimmed)) {
+    return (
+      'terminal 不接受分号链式命令（`;`）。请拆成多次 terminal 调用；' +
+      '若确需在一处完成多步，请写成 .ps1 脚本（分号在脚本体内不受此限制）后 `-File` 执行。'
+    );
+  }
+  // 显式 powershell 调用必须带 -NoProfile（否则用户 profile 会拖慢/污染执行）
+  const isPs = trimmed.startsWith('powershell') || trimmed.startsWith('pwsh');
+  if (isPs && !trimmed.includes('-NoProfile')) {
+    return 'PowerShell 调用必须带 -NoProfile 前缀，例如 `powershell -NoProfile -Command "..."`。';
+  }
+  return null;
+}
+
+/** 判断是否存在「引号之外」的分号（与 sidecar `split_semicolons` 同语义：
+ *  单/双引号成对开关，引号内的分号视为内容，不算链式）。 */
+export function hasUnquotedSemicolon(cmd: string): boolean {
+  let quote: string | null = null;
+  for (const ch of cmd) {
+    if (quote && ch === quote) {
+      quote = null;
+    } else if (!quote && (ch === '"' || ch === "'")) {
+      quote = ch;
+    } else if (!quote && ch === ';') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 把 terminal 的退出码提升为工具层业务失败（规格 3.3.4 的对偶处理）。
+ *
+ * sidecar 侧 `term.exec` 遵循「退出码优先」：非零退出不是 RPC 失败，信封保持
+ * `ok=true`，失败信息放在 `data.exitCode` / `data.stderr`。这个约定对 RPC 层是对的
+ * （调用成功、命令失败），但主进程若只看 `env.ok`，就会把**失败的命令判成成功**，
+ * 从而：卡片显示「完成」、审计记为 ok、回注模型 `{ok:true,...}` → 模型认为命令跑通，
+ * 基于错误前提继续推理，最终产出「已验证」的幻觉结论。
+ *
+ * 这里在不丢 data（stdout/stderr/exitCode 原样保留）的前提下，把非零退出与超时
+ * 转成 `ok=false` + 可读错误，错误码沿用既有语义：
+ *  - 124（超时，sidecar 的约定退出码） → 2002 TERM_TIMEOUT
+ *  - 其余非零                          → 3001 CMD_REJECTED
+ *
+ * 兼容性：仅在「命令类」错误上改写；sidecar 已返回 ok=false 的情况原样透传，
+ * 不覆盖更精确的上游错误（如 3001 命令纪律拒绝、4001 审批缺失）。
+ */
+export function promoteTerminalExit(env: Envelope): Envelope {
+  if (!env.ok) return env;
+  const data = env.data as { exitCode?: unknown; stderr?: unknown; stdout?: unknown } | null | undefined;
+  if (!data || typeof data !== 'object') return env;
+  const code = data.exitCode;
+  if (typeof code !== 'number' || code === 0) return env;
+
+  const stderr = typeof data.stderr === 'string' ? data.stderr.trim() : '';
+  const stdout = typeof data.stdout === 'string' ? data.stdout.trim() : '';
+  // 只取未超长的尾部片段，避免把整段输出塞进错误信息
+  const detail = (stderr || stdout).slice(-600);
+  const isTimeout = code === 124;
+  return {
+    ...env,
+    ok: false,
+    // data 原样保留：stdout/stderr/spillPath 等仍然可用（卡片「结果」区、模型回注都需要）
+    data: env.data,
+    error: {
+      code: isTimeout ? ErrorCode.TERM_TIMEOUT : ErrorCode.CMD_REJECTED,
+      message:
+        (isTimeout
+          ? `terminal 命令超时（超过 timeoutMs，已强制终止，exitCode=124）。`
+          : `terminal 命令以非零退出码结束（exitCode=${code}）。`) +
+        (detail ? `输出尾部：${detail}` : '（无输出）') +
+        '请修正命令或换一种方式后重试；不要假设该命令已成功。',
+    },
+  };
 }
 
 /**
