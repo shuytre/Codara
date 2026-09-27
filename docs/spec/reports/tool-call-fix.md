@@ -124,3 +124,15 @@ RUSTUP_TOOLCHAIN=stable cargo test --manifest-path sidecar/Cargo.toml   # 40 pas
 | 前置校验与 sidecar 漂移 | 两侧规则若再各自修改会重现 C1 | 常量集中 + 两侧测试各自锁定同一批样本命令 |
 
 **回滚**：单次提交可整体 `git revert`；`cmd_rules.rs` 删规则与 Electron 两函数互相独立，可按条回退。
+
+## 六、交付与流水线状态
+
+| 项 | 值 |
+|---|---|
+| 提交链 | `8ac69b5`（cmd_rules 删规则）→ `01ecadb`（注册测试模块）→ `79b0466`（报告）→ `1616cb1`（提示词）→ `5220de1`（runtime 前置+退出码）→ `1127150`（回归测试） |
+| 远端 HEAD | `1127150`（`origin/main`） |
+| CI 运行 | [run 36324847847](https://github.com/shuytre/Codara/actions/runs/36324847847) — **success** |
+| CI 详情 | `Test (ubuntu)` 全部步骤 ✓（含真实 Rust 1.77.2 rust-tests 与真实 sidecar 子进程 e2e）；`build` 全部步骤 ✓（NSIS 安装器 + 便携完整包产出） |
+| 逐文件校验 | 7/7 文件 `git hash-object` 与 `origin/main` blob SHA **逐字节一致** |
+
+> 早期数条 run 为 `cancelled`：工作流 `concurrency.cancel-in-progress=true`，连续 push 时旧 run 被新 run 取代，属预期行为，非失败。
