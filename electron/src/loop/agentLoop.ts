@@ -204,23 +204,41 @@ export class AgentLoop {
 
       for (const tc of result.toolCalls) {
         if (this.aborted) break;
-        let params: unknown = {};
+        // arguments 解析：带常见坏形态自修复；仍失败时明确回注错误而非静默当空参数
+        // （原实现 catch 后 params={}，模型只看到「缺参数」并原样重发同样的坏 JSON，
+        //  陷入无终点循环 —— 这是弱模型场景下工具调用反复失败的直接原因之一）
+        let params: unknown;
+        let argsError: string | null = null;
         try {
-          params = JSON.parse(tc.arguments || '{}');
-        } catch {
-          params = {};
+          params = parseToolArgs(tc.arguments || '');
+        } catch (e) {
+          params = undefined;
+          argsError = (e as Error).message;
         }
 
-        // 计划卡拦截：Plan 模式下首次产出计划时请求批准（M2 行为）
         const card: ToolCallCard = {
           id: `tc-${Date.now()}-${tc.id}`,
           type: 'tool-call',
           status: 'running',
           createdAt: Date.now(),
           tool: tc.name,
-          paramsSummary: JSON.stringify(params).slice(0, 300),
+          paramsSummary: argsError
+            ? `（arguments JSON 解析失败）${(tc.arguments || '').slice(0, 280)}`
+            : JSON.stringify(params).slice(0, 300),
         };
         cb.onCard(card);
+
+        if (argsError) {
+          cb.onCard({ ...card, status: 'failed', result: argsError.slice(0, 800), ok: false });
+          const failMsg: ChatMessage = {
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: JSON.stringify({ ok: false, error: { message: argsError } }).slice(0, 8000),
+          };
+          this.messages.push(failMsg);
+          void this.persist(crew, failMsg);
+          continue;
+        }
 
         // 可中断工具执行（含审批等待）：abort → undefined；真实失败 → 回注错误继续循环
         let r;
@@ -329,6 +347,41 @@ function summarizeResult(r: unknown): string {
   } catch {
     return '[result]';
   }
+}
+
+/**
+ * 解析模型产出的 tool_call.arguments，带常见坏形态自修复：
+ *  1. markdown 代码围栏包裹（```json ... ```）
+ *  2. JSON 前混入说明文字（剥到第一个 { 或 [）
+ *  3. 尾逗号（[1,2,] / {"a":1,}）
+ * 全部失败时抛错（附原文摘要），由调用方把明确错误回注模型 —— 修复参数的
+ * 责任交给模型自纠，而不是静默当空参数执行。不做全角/单引号改写：
+ * 字符串内容里全角字符是合法数据，激进替换会破坏正确参数。
+ */
+export function parseToolArgs(raw: string): unknown {
+  const s = raw.trim();
+  if (!s) return {};
+  const attempts: string[] = [s];
+  const fenced = s.match(/```(?:json|JSON)?\s*([\s\S]*?)```/);
+  if (fenced?.[1] && fenced[1].trim()) attempts.push(fenced[1].trim());
+  const brace = s.search(/[{[]/);
+  if (brace > 0) attempts.push(s.slice(brace));
+  for (const a of attempts) {
+    try {
+      return JSON.parse(a);
+    } catch {
+      /* 尝试下一种形态 */
+    }
+    try {
+      return JSON.parse(a.replace(/,(\s*[}\]])/g, '$1'));
+    } catch {
+      /* 尝试下一种形态 */
+    }
+  }
+  throw new Error(
+    `工具参数不是合法 JSON，无法解析（原文前 200 字：${raw.slice(0, 200)}）。` +
+      '请检查 arguments 的 JSON 语法（引号/逗号/括号闭合）后重新调用本工具。'
+  );
 }
 
 function buildSystemPrompt(mode: TaskMode, toolNames: string[]): string {

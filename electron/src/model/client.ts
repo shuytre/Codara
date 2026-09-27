@@ -145,13 +145,32 @@ export class ModelClient implements ModelProvider {
         }
         if (delta.tool_calls) {
           for (const tc of delta.tool_calls) {
-            const idx: number = tc.index ?? 0;
+            // 槽位定位：优先厂商下发的 index；缺 index 时按 id 匹配既有槽。
+            // 部分兼容实现不发 index：原实现一律堆进 0 号槽，多工具并行时
+            // arguments 交错损坏 → JSON.parse 失败 → 工具调用必失败。
+            let idx: number;
+            if (typeof tc.index === 'number') {
+              idx = tc.index;
+            } else if (tc.id) {
+              const found = toolCalls.findIndex((t) => t.id === tc.id);
+              idx = found >= 0 ? found : toolCalls.length;
+            } else {
+              // 无 index 无 id：归入最后一个槽（单工具场景的后续增量帧）
+              idx = toolCalls.length > 0 ? toolCalls.length - 1 : 0;
+            }
             while (toolCalls.length <= idx) {
               toolCalls.push({ id: '', name: '', arguments: '' });
             }
             const slot = toolCalls[idx] as { id: string; name: string; arguments: string };
             if (tc.id) slot.id = tc.id;
-            if (tc.function?.name) slot.name += tc.function.name;
+            if (tc.function?.name) {
+              const n = tc.function.name;
+              // name 形态兼容：首帧赋值；厂商每帧重发全名则跳过（原实现 += 会
+              // 拼出 "readread" → unknown tool）；累积式（新值含旧值）替换；其余增量拼接
+              if (!slot.name) slot.name = n;
+              else if (slot.name !== n && n.startsWith(slot.name)) slot.name = n;
+              else if (slot.name !== n) slot.name += n;
+            }
             if (tc.function?.arguments) slot.arguments += tc.function.arguments;
             onEvent({ type: 'tool_call_delta', index: idx, id: tc.id, name: tc.function?.name, argsDelta: tc.function?.arguments });
           }
@@ -166,6 +185,13 @@ export class ModelClient implements ModelProvider {
       },
       signal
     ).then(() => {
+      // 部分厂商从不下发 tool_call id：空 id 回注历史后，严格实现的
+      // /chat/completions 会以 400 拒绝（tool_call_id 配对失败），
+      // 从第一个工具轮次起整个会话全部请求失败 —— 聚合结束时必须补齐。
+      for (let i = 0; i < toolCalls.length; i++) {
+        const slot = toolCalls[i] as { id: string; name: string; arguments: string };
+        if (!slot.id) slot.id = `call-${i}-${Date.now()}`;
+      }
       // done 对账：无 usage 时按 chars/4 估算
       if (usage.promptTokens === 0 && usage.completionTokens === 0) {
         const promptChars = req.messages.reduce((n, m) => n + (m.content?.length || 0), 0);
@@ -185,7 +211,7 @@ export class ModelClient implements ModelProvider {
     });
   }
 
-  /** SSE 流：手写分帧（\n\n → data: 行 → [DONE]） */
+  /** SSE 流：手写分帧（空行分帧 → data: 行 → [DONE]） */
   private httpStream(
     endpoint: string,
     apiKey: string,
@@ -244,11 +270,15 @@ export class ModelClient implements ModelProvider {
           res.setEncoding('utf-8');
           res.on('data', (chunk: string) => {
             buffer += chunk;
-            let idx: number;
-            while ((idx = buffer.indexOf('\n\n')) >= 0) {
-              const frame = buffer.slice(0, idx);
-              buffer = buffer.slice(idx + 2);
-              for (const line of frame.split('\n')) {
+            // 帧分隔符兼容三种行尾（SSE 规范允许 CR / LF / CRLF）。
+            // 原实现只找 '\n\n'：CRLF 分帧的服务端（反向代理、部分厂商）会让
+            // 所有帧滞留 buffer 直到流结束 —— content 与 toolCalls 全空，
+            // 表现为「模型不产出任何工具调用」的静默失败。
+            let m: RegExpExecArray | null;
+            while ((m = SSE_FRAME_SEP.exec(buffer))) {
+              const frame = buffer.slice(0, m.index);
+              buffer = buffer.slice(m.index + m[0].length);
+              for (const line of frame.split(SSE_LINE_SEP)) {
                 const trimmed = line.trim();
                 if (!trimmed.startsWith('data:')) continue;
                 const data = trimmed.slice(5).trim();
@@ -317,6 +347,11 @@ interface RetryableError extends Error {
   retryAfterMs?: number;
   status?: number;
 }
+
+/** SSE 空行分帧与行分割：CR / LF / CRLF 三种行尾形态均合法（WHATWG SSE 规范）。
+ *  非 global regex：exec 总是从头匹配，循环内天然取「最靠前的分隔符」。 */
+const SSE_FRAME_SEP = /\r\n\r\n|\n\n|\r\r/;
+const SSE_LINE_SEP = /\r\n|\r|\n/;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
