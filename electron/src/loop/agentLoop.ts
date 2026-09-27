@@ -21,6 +21,9 @@ import { logger } from '../util/logger';
 
 export type TaskMode = 'ask' | 'plan' | 'goal';
 
+/** 极简模式（ask）少工具集：直干长编码而非零工具（用户反馈：极简 = 少工具 + 长 Agent 编码 + PowerShell，2026-09-27） */
+const ASK_TOOLS = new Set(['read', 'search', 'write', 'terminal']);
+
 /** M3：专家团角色实例运行上下文（会话隔离由 sessionId + roleId 绑定） */
 export interface CrewRunContext {
   role: CrewRole;
@@ -110,17 +113,20 @@ export class AgentLoop {
     this.aborted = false;
     this.runAbort = new AbortController();
     const signal = this.runAbort.signal;
-    // 系统提示词：专家团角色用角色提示词；极简模式用三模式变体
+    // 工具集：plan/goal 全量；ask（极简）少工具直干（去掉 git 与索引类，写与终端仍走审批卡）
+    const allSpecs = this.tools.toolSpecs(false);
+    const modeSpecs = mode === 'ask' ? allSpecs.filter((t) => ASK_TOOLS.has(t.name)) : allSpecs;
+    // 系统提示词：专家团角色用角色提示词；主对话用三模式变体
     const systemPrompt = crew
       ? ROLE_DEFS[crew.role].systemPrompt
-      : buildSystemPrompt(mode, this.tools.toolSpecs(false).map((t) => t.name));
+      : buildSystemPrompt(mode, modeSpecs.map((t) => t.name));
     // M5 记忆注入（规格 4.5/4.8）：全局/项目记忆统一注入所有角色；
     // 沙箱临时技术会话跳过项目记忆正文（4.8），角色会话历史隔离不变
     const mem = loadMemory(this.settings.get('workspacePath') || undefined);
     const fullSystemPrompt = withMemory(systemPrompt, mem, { sandbox: crew?.sandbox });
     const toolSpecs = crew
       ? toolSpecsForRole(this.tools.toolSpecs(true), crew.role)
-      : this.tools.toolSpecs(false);
+      : modeSpecs;
     if (this.messages.length === 0) {
       const sysMsg: ChatMessage = { role: 'system', content: fullSystemPrompt };
       this.messages.push(sysMsg);
@@ -131,8 +137,8 @@ export class AgentLoop {
     void this.persist(crew, userMsg);
 
     let iterations = 0;
-    // 轮次上限：角色实例用角色矩阵；主对话按模式
-    const maxIter = crew ? ROLE_DEFS[crew.role].maxTurns : mode === 'goal' ? 40 : 12;
+    // 轮次上限：角色实例用角色矩阵；主对话按模式（ask 直干长编码给足轮次）
+    const maxIter = crew ? ROLE_DEFS[crew.role].maxTurns : mode === 'goal' ? 40 : mode === 'ask' ? 20 : 12;
 
     for (;;) {
       if (this.aborted) break;
@@ -147,7 +153,7 @@ export class AgentLoop {
         result = await this.model.chatStream(
           {
             messages: this.messages,
-            tools: mode === 'ask' ? undefined : toolSpecs,
+            tools: toolSpecs,
           },
           (e) => {
             if (e.type === 'delta') cb.onDelta(e.text);
@@ -391,7 +397,7 @@ function buildSystemPrompt(mode: TaskMode, toolNames: string[]): string {
 1. 工具极简：只拥有 ${toolNames.join(' / ')}。不存在的工具视为不可用，禁止用 shell 模拟其他能力。
 2. 先搜后读，先读后写：定位用 search，内容用 read（指定行范围），改动用 write（补丁），验证用 terminal。禁止盲读大文件、禁止无搜索直接改。
 3. 最小编辑：只改任务要求的最小范围。禁止顺手重构、格式化、补注释、改无关代码。
-4. Shell 纪律：默认 cmd.exe（Windows）。禁止 && / ; 长链；管道仅限简单 findstr。
+4. Shell 纪律：默认 PowerShell（powershell.exe，Win7 自带 2.0+）。&& 不可用（PS7 才支持），链式命令用分号分隔；路径含空格必须加引号；文本过滤用 Select-String（等效 findstr/grep）；目录列表用 Get-ChildItem。
 5. Token 纪律：思考只包含"目标→行动→参数"。回复只包含"结论+证据+下一步"。
 6. 失败纪律：同一命令连续失败 2 次，停止重试，输出根因分析，请求人类裁决。
 7. 破坏性操作：删除文件、git push、安装软件、写工作区外路径，必须先申请批准（系统会弹出审批卡）。
@@ -409,7 +415,10 @@ function buildSystemPrompt(mode: TaskMode, toolNames: string[]): string {
 - 工具失败不会终止会话，错误信封会回注给你；据此修正参数重试，或换一条路径，或如实向用户说明卡点。`;
 
   if (mode === 'ask') {
-    return base + '\n\n当前任务模式：Ask。只回答问题，不要调用写类工具。';
+    return (
+      base +
+      '\n\n当前任务模式：Ask（极简直干）。少工具集（read / search / write / terminal）：直接读码、搜码、改码、跑 PowerShell 验证，一气呵成，无需先出计划；写文件与高危命令仍会弹审批卡，批准即执行。'
+    );
   }
   if (mode === 'plan') {
     return base + '\n\n当前任务模式：Plan。先探查定位，改动前输出分步计划（每步含验证方式），获得批准后执行。';

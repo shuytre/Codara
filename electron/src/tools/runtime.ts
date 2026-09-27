@@ -262,8 +262,8 @@ export class ToolRuntime {
       };
     }
 
-    // Ask 模式禁用写类工具
-    if (mode === 'ask' && (tool === 'write' || tool === 'terminal' || (tool === 'git' && isWriteOp(params)))) {
+    // Ask 模式（极简少工具集）：git 不在集内，防御性拒绝；write/terminal 放行（走网关审批卡），index.* 只读放行
+    if (mode === 'ask' && (tool === 'git' || tool.startsWith('artifact.'))) {
       return {
         ok: false,
         error: { code: 4002, message: `tool ${tool} is not allowed in Ask mode` },
@@ -280,7 +280,7 @@ export class ToolRuntime {
         ok: false,
         error: {
           code: 4003,
-          message: '未打开工作区：请用户先点击输入区上方「打开文件夹」（或左栏「打开」）选择项目文件夹后再执行本工具。',
+          message: '未打开工作区：请用户先点击输入框下方工具行的「未打开工作区」按钮选择项目文件夹后再执行本工具。',
         },
         tool,
         params,
@@ -412,11 +412,6 @@ export class ToolRuntime {
 
     return { ...env, tool, params: summarize(params), durationMs: Date.now() - started };
   }
-}
-
-function isWriteOp(params: unknown): boolean {
-  const op = (params as GitParams)?.op;
-  return ['commit', 'branch-create', 'worktree-create', 'worktree-remove', 'revert'].includes(op || '');
 }
 
 /**
