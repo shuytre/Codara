@@ -22,8 +22,6 @@
 }
 .pane-title { font-size: 11px; font-weight: 700; color: var(--ink-tertiary); text-transform: uppercase; letter-spacing: .05em; margin: 12px 0 6px; }
 .pane-title:first-child { margin-top: 0; }
-.ws-row { display: flex; gap: 6px; align-items: center; }
-.ws-path { font-size: 12px; color: var(--ink-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .tree-node { padding: 6px 10px; border-radius: var(--radius); font-size: 13px; }
 .tree-node.active { background: var(--ink-black); color: #fff; }
 .tree-hint { font-size: 11px; color: var(--ink-tertiary); padding: 6px 10px; }
@@ -104,6 +102,16 @@ pre.card-body { white-space: pre-wrap; word-break: break-word; max-height: 300px
 /* Composer 工具行（Codex 式：提示在左、模型切换与发送在右） */
 .composer-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
 .toolbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+/* 工作区入口 chip（自左栏顶部移入 Composer 工具行左侧，Codex 式） */
+.ws-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 200px; padding: 4px 10px; font-size: 12px;
+  color: var(--ink-secondary); background: var(--bg-panel);
+  border: 1px solid var(--hairline); border-radius: 8px;
+}
+.ws-chip:hover { color: var(--cobalt); border-color: var(--cobalt); }
+.ws-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-chip svg { flex: none; }
 /* 模式选择器嵌入输入框内部左下角：textarea 预留底部空间，select 浮于其上 */
 .composer-input-wrap { position: relative; }
 .composer-input-wrap textarea { padding-bottom: 42px; }
@@ -112,7 +120,6 @@ pre.card-body { white-space: pre-wrap; word-break: break-word; max-height: 300px
 .mode-inline .mode-select { margin: 0; }
 .composer-actions { display: flex; align-items: center; gap: 8px; }
 .model-switch { max-width: 240px; font-size: 12px; padding: 4px 8px; }
-.ws-banner { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: #fef9ec; color: var(--amber-warn); font-size: 12px; padding: 6px 10px; border-radius: var(--radius); margin-bottom: 8px; }
 .entry-cards { margin-top: 6px; }
 
 /* Markdown 正文（Agent 回复） */
@@ -177,6 +184,8 @@ pre.card-body { white-space: pre-wrap; word-break: break-word; max-height: 300px
 .tpl.local { border-style: dashed; }
 .wizard-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 .wizard-card label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--ink-secondary); margin-top: 12px; }
+/* check-row 型 label 恢复横排（wizard-card label 的 column 化会让勾选框悬在文字上方） */
+.wizard-card label.check-row { flex-direction: row; align-items: center; gap: 6px; }
 .wizard-card .hint { font-size: 11px; color: var(--ink-tertiary); margin-top: 14px; }
 /* 在线拉取的模型勾选列表（向导/设置页共用） */
 .model-pick-list { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; max-height: 220px; overflow-y: auto; border: 1px solid var(--hairline, #e3e5e8); border-radius: 8px; padding: 8px 10px; }

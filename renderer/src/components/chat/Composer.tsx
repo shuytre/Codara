@@ -4,12 +4,18 @@ import { createSignal, For, Show } from 'solid-js';
 import { bridge } from '../../ipc/client';
 import { appendEntry, chat, setChat, setSettings, settings, setUi, setUsage, usage } from '../../state/stores';
 
-/** 原生下拉选项（ask=极简零工具；plan=标准全工具；goal=挂机自驱） */
+/** 原生下拉选项（ask=极简直干少工具；plan=标准全工具；goal=挂机自驱） */
 const MODE_OPTIONS: Array<{ id: 'ask' | 'plan' | 'goal'; label: string; tip: string }> = [
-  { id: 'ask', label: '极简模式（默认）', tip: '纯问答，不调用工具、不写文件' },
+  { id: 'ask', label: '极简模式（默认）', tip: '少工具直干：读 / 搜 / 写 / PowerShell，长 Agent 编码不搞流程' },
   { id: 'goal', label: 'Goal 模式', tip: '给定目标与验收标准，预授权后挂机自驱' },
   { id: 'plan', label: '标准模式（全工具）', tip: '全工具可用，先计划后执行' },
 ];
+
+/** 工作区显示名：只取最后一级目录（C:\你好 → 你好）；盘符根原样显示 */
+const wsName = (p: string) => {
+  const parts = p.split(/[\\/]+/).filter(Boolean);
+  return parts.length > 1 ? parts[parts.length - 1] : p;
+};
 
 export function Composer() {
   const b = bridge();
@@ -104,14 +110,6 @@ export function Composer() {
 
   return (
     <div class="composer">
-      <Show when={!settings.value?.workspacePath}>
-        <div class="ws-banner">
-          <span>未打开工作区 —— 文件 / 终端类工具无法执行</span>
-          <button class="small" onClick={openWorkspace}>
-            打开文件夹
-          </button>
-        </div>
-      </Show>
       <Show when={usage.budget.suspended}>
         <div class="budget-banner">预算已熔断，任务已挂起 —— 请在右栏处理</div>
       </Show>
@@ -145,7 +143,7 @@ export function Composer() {
           rows="3"
           placeholder={
             chat.mode === 'ask'
-              ? '极简模式：提出问题，Agent 直接回答（零工具）'
+              ? '极简模式：直接下任务，Agent 少工具长编码（读 / 搜 / 写 / PowerShell）'
               : chat.mode === 'plan'
                 ? '标准模式：描述目标，Agent 先出计划，批准后执行'
                 : 'Goal：给定目标与验收标准，挂机自驱'
@@ -174,6 +172,15 @@ export function Composer() {
       </div>
       <div class="composer-toolbar">
         <div class="toolbar-left">
+          {/* 工作区入口（自左栏顶部移入，Codex 式 chip）：常驻显示，点击选择/更换项目文件夹 */}
+          <button
+            class="ws-chip"
+            title={settings.value?.workspacePath || '点击选择项目文件夹'}
+            onClick={openWorkspace}
+          >
+            <IconFolder />
+            <span>{settings.value?.workspacePath ? wsName(settings.value.workspacePath) : '未打开工作区'}</span>
+          </button>
           <span class="hint">Ctrl+Enter 发送</span>
         </div>
         <div class="composer-actions">
@@ -237,6 +244,25 @@ function IconStop() {
       stroke="none"
     >
       <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
+  );
+}
+
+/** lucide: folder（工作区 chip） */
+function IconFolder() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
     </svg>
   );
 }

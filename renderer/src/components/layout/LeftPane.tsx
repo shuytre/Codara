@@ -1,5 +1,6 @@
-// 左栏：Codex/豆包式对话分组列表（今天 / 更早）+ 工作区 + 设置入口
+// 左栏：Codex/豆包式对话分组列表（今天 / 更早）+ 设置入口
 // 主对话固定首位；「+」新建对话；点击会话切换（恢复历史消息）
+// 工作区入口已移至 Composer 底部工具行（ws-chip）
 import { createSignal, For, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
@@ -13,28 +14,12 @@ import {
   setActiveConversation,
   setCards,
   setChat,
-  setSettings,
   setUi,
-  settings,
 } from '../../state/stores';
 
 export function LeftPane(props: { onOpenSettings: () => void }) {
   const b = bridge();
-  const [busy, setBusy] = createSignal(false);
   const [switching, setSwitching] = createSignal(false);
-
-  const openWorkspace = async () => {
-    setBusy(true);
-    try {
-      const dir = await b.workspaceOpen();
-      if (dir && settings.value) {
-        const v = await b.settingsGet();
-        setSettings('value', v as never);
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const clearStream = () => {
     setChat({ entries: [], liveId: null, streaming: false, streamText: '' });
@@ -95,24 +80,8 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
   const todayConvs = () => convs.list.filter((c) => c.createdAt >= startOfToday);
   const earlierConvs = () => convs.list.filter((c) => c.createdAt < startOfToday);
 
-  // 工作区显示名：只取最后一级目录（C:\你好 → 你好），完整路径放 title 悬浮提示；
-  // 盘符根（C:\）无可取的目录名，原样显示
-  const wsName = (p: string) => {
-    const parts = p.split(/[\\/]+/).filter(Boolean);
-    return parts.length > 1 ? parts[parts.length - 1] : p;
-  };
-
   return (
     <aside class="left-pane">
-      <div class="ws-row ws-row-head">
-        <span class="ws-path" title={settings.value?.workspacePath || '未打开工作区'}>
-          {settings.value?.workspacePath ? wsName(settings.value.workspacePath) : '未打开工作区'}
-        </span>
-        <button class="small" disabled={busy()} onClick={openWorkspace}>
-          打开
-        </button>
-      </div>
-
       <div class="pane-title">
         对话
         <button class="icon-btn" title="新建对话" disabled={switching()} onClick={newChat}>

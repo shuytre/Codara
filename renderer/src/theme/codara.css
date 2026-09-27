@@ -110,10 +110,10 @@ details > pre.card-body { border-radius: 0 0 12px 12px; }
 .foot-btn:hover { background: var(--bg-hover); color: var(--cobalt); }
 .foot-btn svg { flex: none; }
 
-/* ---- 发送/终止：圆形图标钮（比例均衡） ---- */
+/* ---- 发送/终止：方形图标钮（正方形 + 小圆角，Meta 扁平风） ---- */
 .send-btn {
   display: grid; place-items: center; width: 34px; height: 34px; padding: 0;
-  border-radius: 999px;
+  border-radius: 10px;
 }
 .send-btn:disabled { opacity: .45; cursor: not-allowed; }
 
