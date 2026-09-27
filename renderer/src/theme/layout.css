@@ -10,7 +10,6 @@
   flex: none;
 }
 .titlebar .logo { font-weight: 700; color: var(--cobalt); font-size: 15px; }
-.titlebar .mode-hint { color: var(--ink-tertiary); font-size: 12px; }
 
 .columns { display: flex; flex: 1; min-height: 0; }
 
@@ -102,10 +101,15 @@ pre.card-body { white-space: pre-wrap; word-break: break-word; max-height: 300px
 .composer .hint { font-size: 11px; color: var(--ink-tertiary); }
 .budget-banner { background: #fef9ec; color: var(--amber-warn); font-size: 12px; padding: 6px 10px; border-radius: var(--radius); margin-bottom: 8px; }
 
-/* Composer 工具行（Codex 式：模式下拉在左、模型切换与发送在右） */
+/* Composer 工具行（Codex 式：提示在左、模型切换与发送在右） */
 .composer-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
 .toolbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+/* 模式选择器嵌入输入框内部左下角：textarea 预留底部空间，select 浮于其上 */
+.composer-input-wrap { position: relative; }
+.composer-input-wrap textarea { padding-bottom: 42px; }
+.mode-inline { position: absolute; left: 8px; bottom: 8px; }
 .mode-select { width: auto; max-width: 200px; font-size: 12px; padding: 5px 8px; }
+.mode-inline .mode-select { margin: 0; }
 .composer-actions { display: flex; align-items: center; gap: 8px; }
 .model-switch { max-width: 240px; font-size: 12px; padding: 4px 8px; }
 .ws-banner { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: #fef9ec; color: var(--amber-warn); font-size: 12px; padding: 6px 10px; border-radius: var(--radius); margin-bottom: 8px; }
@@ -154,6 +158,11 @@ pre.card-body { white-space: pre-wrap; word-break: break-word; max-height: 300px
 
 /* 向导 */
 .wizard { display: grid; place-items: center; height: 100%; background: var(--bg); }
+/* 设置页 = 全屏遮罩层：.wizard 参与文档流会与三栏层叠干涉（Composer 发送按钮穿透显示），
+   fixed + z-index 彻底盖住下层；首导向导仍用流内 .wizard */
+.wizard.settings-layer { position: fixed; inset: 0; z-index: 100; }
+/* 设置页分区小标题（视图 / 通用） */
+.settings-section { font-size: 11px; font-weight: 700; color: var(--ink-tertiary); text-transform: uppercase; letter-spacing: .05em; margin-top: 16px; }
 .wizard-card {
   width: 560px; max-width: 92vw; max-height: 90vh; overflow-y: auto;
   background: var(--bg-panel); border: 1px solid var(--hairline); border-radius: 10px; padding: 28px;

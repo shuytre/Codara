@@ -1,4 +1,4 @@
-// 左栏：Codex/豆包式对话分组列表（今天 / 更早）+ 工作区 + 视图 + 设置入口
+// 左栏：Codex/豆包式对话分组列表（今天 / 更早）+ 工作区 + 设置入口
 // 主对话固定首位；「+」新建对话；点击会话切换（恢复历史消息）
 import { createSignal, For, Show } from 'solid-js';
 
@@ -16,7 +16,6 @@ import {
   setSettings,
   setUi,
   settings,
-  ui,
 } from '../../state/stores';
 
 export function LeftPane(props: { onOpenSettings: () => void }) {
@@ -96,11 +95,18 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
   const todayConvs = () => convs.list.filter((c) => c.createdAt >= startOfToday);
   const earlierConvs = () => convs.list.filter((c) => c.createdAt < startOfToday);
 
+  // 工作区显示名：只取最后一级目录（C:\你好 → 你好），完整路径放 title 悬浮提示；
+  // 盘符根（C:\）无可取的目录名，原样显示
+  const wsName = (p: string) => {
+    const parts = p.split(/[\\/]+/).filter(Boolean);
+    return parts.length > 1 ? parts[parts.length - 1] : p;
+  };
+
   return (
     <aside class="left-pane">
       <div class="ws-row ws-row-head">
         <span class="ws-path" title={settings.value?.workspacePath || '未打开工作区'}>
-          {settings.value?.workspacePath || '未打开工作区'}
+          {settings.value?.workspacePath ? wsName(settings.value.workspacePath) : '未打开工作区'}
         </span>
         <button class="small" disabled={busy()} onClick={openWorkspace}>
           打开
@@ -142,15 +148,7 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
         </Show>
       </div>
 
-      <div class="pane-title">视图</div>
-      <label class="check-row">
-        <input
-          type="checkbox"
-          checked={ui.rightPaneVisible}
-          onChange={(e) => setUi({ rightPaneVisible: e.currentTarget.checked })}
-        />
-        显示右栏
-      </label>
+      {/* 「显示右栏」已整合进设置面板（视图开关） */}
 
       <div class="left-pane-foot">
         <button class="foot-btn" title="设置" onClick={props.onOpenSettings}>

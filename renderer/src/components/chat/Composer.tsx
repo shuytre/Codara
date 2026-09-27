@@ -1,4 +1,4 @@
-// 输入区：Codex 式布局 —— 输入框在上，下方左侧模式下拉、右侧模型切换 + 发送/终止
+// 输入区：Codex 式布局 —— 输入框（模式选择器内嵌左下角）+ 底部工具行（提示 / 模型切换 + 发送/终止）
 import { createSignal, For, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
@@ -140,23 +140,24 @@ export function Composer() {
           </div>
         </div>
       </Show>
-      <textarea
-        rows="3"
-        placeholder={
-          chat.mode === 'ask'
-            ? '极简模式：提出问题，Agent 直接回答（零工具）'
-            : chat.mode === 'plan'
-              ? '标准模式：描述目标，Agent 先出计划，批准后执行'
-              : 'Goal：给定目标与验收标准，挂机自驱'
-        }
-        value={text()}
-        onInput={(e) => setText(e.currentTarget.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void send();
-        }}
-      />
-      <div class="composer-toolbar">
-        <div class="toolbar-left">
+      <div class="composer-input-wrap">
+        <textarea
+          rows="3"
+          placeholder={
+            chat.mode === 'ask'
+              ? '极简模式：提出问题，Agent 直接回答（零工具）'
+              : chat.mode === 'plan'
+                ? '标准模式：描述目标，Agent 先出计划，批准后执行'
+                : 'Goal：给定目标与验收标准，挂机自驱'
+          }
+          value={text()}
+          onInput={(e) => setText(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void send();
+          }}
+        />
+        {/* 模式选择器嵌入输入框左下角（紧贴输入，不再挤在底部工具行） */}
+        <div class="mode-inline">
           <select
             class="mode-select"
             value={chat.mode}
@@ -169,6 +170,10 @@ export function Composer() {
           >
             <For each={MODE_OPTIONS}>{(m) => <option value={m.id}>{m.label}</option>}</For>
           </select>
+        </div>
+      </div>
+      <div class="composer-toolbar">
+        <div class="toolbar-left">
           <span class="hint">Ctrl+Enter 发送</span>
         </div>
         <div class="composer-actions">

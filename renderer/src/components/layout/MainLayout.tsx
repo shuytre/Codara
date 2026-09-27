@@ -26,7 +26,6 @@ export function MainLayout() {
     <div class="main-layout">
       <header class="titlebar">
         <span class="logo">Codara</span>
-        <span class="mode-hint">对话即全部 · 计划 / 审批 / 终端 / diff 都在对话流中</span>
       </header>
       <div class="columns">
         <LeftPane onOpenSettings={() => setSettingsOpen(true)} />

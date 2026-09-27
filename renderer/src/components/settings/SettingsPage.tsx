@@ -22,6 +22,8 @@ export function SettingsPage(props: { onClose: () => void }) {
   const [tokenLimit, setTokenLimit] = createSignal(s()?.budget.tokenLimit || 0);
   const [costLimit, setCostLimit] = createSignal(s()?.budget.costLimitCNY || 0);
   const [minimal, setMinimal] = createSignal(s()?.ui.minimalMode || false);
+  // 视图开关（原左栏「视图/显示右栏」，已整合进设置页）
+  const [rightPaneVisible, setRightPaneVisible] = createSignal(s()?.ui.rightPaneVisible ?? true);
   const [saving, setSaving] = createSignal(false);
   const [saved, setSaved] = createSignal(false);
   // 在线拉取模型
@@ -101,7 +103,7 @@ export function SettingsPage(props: { onClose: () => void }) {
           tokenLimit: tokenLimit() > 0 ? tokenLimit() : undefined,
           costLimitCNY: costLimit() > 0 ? costLimit() : undefined,
         },
-        ui: { minimalMode: minimal() },
+        ui: { minimalMode: minimal(), rightPaneVisible: rightPaneVisible() },
       });
       const v = await b.settingsGet();
       setSettings('value', v);
@@ -129,7 +131,7 @@ export function SettingsPage(props: { onClose: () => void }) {
   };
 
   return (
-    <div class="wizard">
+    <div class="wizard settings-layer">
       <div class="wizard-card">
         <h1>设置</h1>
         <label>
@@ -192,6 +194,15 @@ export function SettingsPage(props: { onClose: () => void }) {
         <label class="check-row">
           <input type="checkbox" checked={minimal()} onChange={(e) => setMinimal(e.currentTarget.checked)} />
           老机模式（关闭动画、右栏收起）
+        </label>
+        <div class="settings-section">视图</div>
+        <label class="check-row">
+          <input
+            type="checkbox"
+            checked={rightPaneVisible()}
+            onChange={(e) => setRightPaneVisible(e.currentTarget.checked)}
+          />
+          显示右栏（用量 / 审批队列 / 工具流水）
         </label>
         <Show when={mem()}>
           {(m) => (
