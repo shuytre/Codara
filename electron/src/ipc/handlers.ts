@@ -4,7 +4,7 @@ import * as http from 'http';
 import * as https from 'https';
 import * as path from 'path';
 import { BrowserWindow, dialog, ipcMain } from 'electron';
-import { z } from 'zod';
+import { z }n from 'zod';
 import {
   ApprovalCard,
   ApprovalRespondPayload,
@@ -178,6 +178,12 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     return dir;
   });
 
+  // preload 已向渲染层暴露 workspaceGet，但此前 main 从未注册对应 handler，
+  // 渲染层一旦调用即抛「No handler registered」—— 契约面必须闭合。
+  ipcMain.handle(IPC.workspaceGet, async (): Promise<string | undefined> => {
+    return settings.get('workspacePath') || undefined;
+  });
+
   // ---------- 审批等待表（须在 chatSend 之前定义） ----------
   // 审批回调只能在注册期绑定一次：原实现放在 chatSend 内部，每次发送都会 push 一个新的
   // listener，导致第 N 次对话需要连点 N 次「批准」，且旧 listener 的 Promise 永不结算。
@@ -276,57 +282,69 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
       _e,
       payload: unknown,
     ): Promise<{ ok: boolean; error?: string; messages?: Array<{ role: string; content: string }> }> => {
-      try {
-        const p = z.object({ sessionId: z.string().min(1) }).parse(payload);
-        deps.loop.abort();
-        deps.loop.reset();
-        deps.loop.attachMainSession(p.sessionId);
-        // 恢复历史（roleId=main 约定；失败不阻塞切换，仅失去模型上下文）
-        const hist = await sidecar.call('msg.list', { sessionId: p.sessionId, roleId: 'main', limit: 200 });
-        if (hist.ok) {
-          const rows = (hist.data as { messages?: Array<Record<string, unknown>> } | undefined)?.messages ?? [];
-          const history = rows
-            .map((r) => {
-              const role = String(r.role ?? 'assistant');
-              const raw = r.content;
-              let content = '';
-              if (typeof raw === 'string') {
-                try {
-                  const parsed = JSON.parse(raw) as unknown;
-                  content = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
-                } catch {
-                  content = raw;
-                }
+    try {
+      const p = z.object({ sessionId: z.string().min(1) }).parse(payload);
+      deps.loop.abort();
+      deps.loop.reset();
+      deps.loop.attachMainSession(p.sessionId);
+      // 恢复历史（roleId=main 约定；失败不阻塞切换，仅失去模型上下文）
+      const hist = await sidecar.call('msg.list', { sessionId: p.sessionId, roleId: 'main', limit: 200 });
+      if (hist.ok) {
+        const rows = (hist.data as { messages?: Array<Record<string, unknown>> } | undefined)?.messages ?? [];
+        const history = rows
+          .map((r) => {
+            const role = String(r.role ?? 'assistant');
+            const raw = r.content;
+            let content = '';
+            if (typeof raw === 'string') {
+              try {
+                const parsed = JSON.parse(raw) as unknown;
+                content = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+              } catch {
+                content = raw;
               }
-              const m: Record<string, unknown> = { role, content };
-              if (r.toolCallId) m.tool_call_id = r.toolCallId;
-              if (r.toolCalls) {
-                try {
-                  m.tool_calls = JSON.parse(String(r.toolCalls));
-                } catch {
-                  /* 忽略损坏行 */
-                }
-              }
-              return m;
-            })
-            // assistant 带 tool_calls 时 content 为 null，若按 content 过滤会留下孤立的
-            // role='tool' 消息，OpenAI 兼容接口会报 400（tool 消息必须有前置 tool_calls）。
-            .filter((m) => Boolean(m.content) || Array.isArray(m.tool_calls));
-          deps.loop.loadMessages(history as never[]);
-          // 回传渲染层用于重建对话流：否则左栏切换会话后中栏一片空白，用户以为历史丢了
-          return {
-            ok: true,
-            messages: history
-              .filter((m) => typeof m.content === 'string' && m.content.length > 0)
-              .map((m) => ({ role: String(m.role), content: String(m.content) })),
-          };
-        }
-        return { ok: true };
-      } catch (err) {
-        logger.warn('chat switch failed', err);
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+            }
+            const m: Record<string, unknown> = { role, content };
+            if (r.toolCallId) m.tool_call_id = r.toolCallId;
+            const tcs = parsePersistedToolCalls(r.toolCalls);
+            if (tcs) m.tool_calls = tcs;
+            // 旧存储下 assistant tool_calls 行 content 是 ''（null 序列化产物）；
+            // OpenAI 兼容接口对带 tool_calls 的 assistant 期待 content=null
+            if (role === 'assistant' && content === '' && tcs) {
+              m.content = null;
+            }
+            return m;
+          })
+          // assistant 带 tool_calls 时 content 为 null，若按 content 过滤会留下孤立的
+          // role='tool' 消息，OpenAI 兼容接口会报 400（tool 消息必须有前置 tool_calls）。
+          .filter((m) => Boolean(m.content) || Array.isArray(m.tool_calls))
+          // 清理孤立 tool 消息：前置 assistant tool_calls 行若缺失/解析失败（旧版双重
+          // 编码、历史损坏），孤立的 tool 消息会让之后每一轮请求都 400 —— 整个会话
+          // 的工具调用从此全部失败。丢弃孤儿行，保住会话可用性。
+          .filter((m, i, arr) => {
+            if (m.role !== 'tool') return true;
+            return arr.slice(0, i).some((prev) => {
+              if (prev.role !== 'assistant' || !Array.isArray(prev.tool_calls)) return false;
+              const id = m.tool_call_id;
+              if (!id) return true;
+              return (prev.tool_calls as Array<{ id?: string }>).some((t) => t.id === id);
+            });
+          });
+        deps.loop.loadMessages(history as never[]);
+        // 回传渲染层用于重建对话流：否则左栏切换会话后中栏一片空白，用户以为历史丢了
+        return {
+          ok: true,
+          messages: history
+            .filter((m) => typeof m.content === 'string' && m.content.length > 0)
+            .map((m) => ({ role: String(m.role), content: String(m.content) })),
+        };
       }
-    });
+      return { ok: true };
+    } catch (err) {
+      logger.warn('chat switch failed', err);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
 
   // 主对话原点会话 id（启动时创建；chatNew 换会话不影响原点，左栏「主对话」回切用）
   ipcMain.handle(IPC.chatMainSession, async (): Promise<{ sessionId: string | null }> => {
@@ -574,6 +592,26 @@ const BudgetRespondSchema = z.object({
   newTokenLimit: z.number().optional(),
   newCostLimitCNY: z.number().optional(),
 });
+
+/**
+ * 解析持久化的 tool_calls 字段，兼容两代存储：
+ *  - 新版（sidecar as_str 取参）：单层 JSON 字符串
+ *  - 旧版（sidecar Value::to_string 存参）：双重编码字符串
+ * 解不出数组返回 undefined，由调用方按「tool_calls 缺失」处理
+ * （孤立 tool 消息会被后续过滤规则清理，避免 API 400 打断整个会话）。
+ */
+function parsePersistedToolCalls(raw: unknown): unknown[] | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  let v: unknown = raw;
+  for (let i = 0; i < 2 && typeof v === 'string'; i++) {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return undefined;
+    }
+  }
+  return Array.isArray(v) ? v : undefined;
+}
 
 // 向导模板映射（与 shared VENDOR_TEMPLATES 同步）
 const VENDOR_TEMPLATES_MAP: Record<string, { endpoint: string; defaultModel: string; pricing: { promptPerM: number; completionPerM: number } }> = {

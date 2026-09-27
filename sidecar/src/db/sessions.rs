@@ -122,8 +122,18 @@ pub fn msg_append(state: &mut AppState, params: Value) -> Envelope {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "role (user|assistant|tool|system) is required"),
     };
-    let content = params.get("content").map(|v| v.to_string());
-    let tool_calls = params.get("toolCalls").map(|v| v.to_string());
+    // 字符串参数必须用 as_str() 取原文。此前用 Value::to_string() 是序列化语义：
+    // 传入的字符串会被再包一层引号并转义（双重编码），导致 msg.list 恢复历史时
+    // tool_calls 解析不出数组 → assistant 工具行被过滤 → 孤立 tool 消息 →
+    // 之后每一轮 /chat/completions 都被 OpenAI 兼容接口 400 拒绝（工具调用全灭）。
+    let content = params
+        .get("content")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let tool_calls = params
+        .get("toolCalls")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let tool_call_id = params.get("toolCallId").and_then(|v| v.as_str()).map(String::from);
     let up = params.get("usagePrompt").and_then(|v| v.as_i64()).unwrap_or(0);
     let uc = params.get("usageCompletion").and_then(|v| v.as_i64()).unwrap_or(0);
