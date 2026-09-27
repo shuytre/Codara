@@ -4,23 +4,23 @@
 //  - C1 规则自相矛盾：提示词第 4 条教模型「链式命令用分号分隔」，而 sidecar 的
 //       `validate_command` 恰恰**拒绝**引号外分号；模型照提示词写，命令必被拒。
 //  - C2 长度门槛误杀正确命令：`>200 字符且不含 .ps1 → 拒绝` 是**长度**规则而非
-//       危险性规则。222 字符的 Invoke-WebRequest + try/catch 探测（真实常见写法）
-//       被全量误杀；201 字符被拒而 199 字符放行。表现为 terminal「时好时坏」。
+//      危险性规则。222 字符的 Invoke-WebRequest + try/catch 探测（真实常见写法）
+//      被全量误杀；201 字符被拒而 199 字符放行。表现为 terminal「时好时坏」。
 //  - C3 审批后仍失败：上述校验发生在**审批卡弹出之后**，用户点了「批准」，
-//       命令照样被同一条规则拒绝 —— 审批卡变成无效交互（截图：卡上「已批准」，
-//       工具流里却 ✗）。
+//      命令照样被同一条规则拒绝 —— 审批卡变成无效交互（截图：卡上「已批准」，
+//      工具流里却 ✗）。
 //  - C4 失败被当成成功：sidecar 遵循规格 3.3.4「退出码优先」，命令执行失败
-//       （exitCode≠0 / 超时 124）仍返回 `ok=true`，失败信息只在 data.exitCode/stderr。
-//       主进程此前只看 `env.ok`，于是**失败的命令被标成「完成」**，模型据此以为
-//       跑通了并继续推理，产出「已验证」式幻觉。
+//      （exitCode≠0 / 超时 124）仍返回 `ok=true`，失败信息只在 data.exitCode/stderr。
+//      主进程此前只看 `env.ok`，于是**失败的命令被标成「完成」**，模型据此以为
+//      跑通了并继续推理，产出「已验证」式幻觉。
 //
 // 修复策略（对应用户拍板的方案）：
 //  - 放宽长度门槛 + 消解矛盾：删掉 >200 的 PS 一行式规则（长度上限统一由
-//     sidecar 的 2000 字符 CMD_OVERFLOW_BLOCKED 承担）；提示词改为禁 `;` 链式。
+//    sidecar 的 2000 字符 CMD_OVERFLOW_BLOCKED 承担）；提示词改为禁 `;` 链式。
 //  - 校验前置到审批前：主进程 `precheckTerminalCommand` 与 sidecar 同规则、
-//     同语义，非法命令**不弹卡**，直接把可自纠的说明回注模型。
+//    同语义，非法命令**不弹卡**，直接把可自纠的说明回注模型。
 //  - 退出码提升为业务失败：`promoteTerminalExit` 把 exitCode≠0 / 124 转成
-//     ok=false（3001 CMD_REJECTED / 2002 TERM_TIMEOUT），并**保留 data**。
+//    ok=false（3001 CMD_REJECTED / 2002 TERM_TIMEOUT），并**保留 data**。
 import { describe, expect, it } from 'vitest';
 
 import {
