@@ -144,6 +144,10 @@ export class ModelClient implements ModelProvider {
           onEvent({ type: 'delta', text: delta.content });
         }
         if (delta.tool_calls) {
+          // 本帧内已开启的槽位：无 index/id 时用于识别「同一帧里的多个并行工具调用」。
+          // 同一帧中出现的第 2..n 个 tool_call 必为新槽（一个帧不会把同一工具的
+          // 两段 arguments 拆成两个数组项），据此可与跨帧续帧区分开。
+          let openedThisFrame = 0;
           for (const tc of delta.tool_calls) {
             // 槽位定位：优先厂商下发的 index；缺 index 时按 id 匹配既有槽。
             // 部分兼容实现不发 index：原实现一律堆进 0 号槽，多工具并行时
@@ -154,10 +158,23 @@ export class ModelClient implements ModelProvider {
             } else if (tc.id) {
               const found = toolCalls.findIndex((t) => t.id === tc.id);
               idx = found >= 0 ? found : toolCalls.length;
+            } else if (tc.function?.name && toolCalls.length > 0) {
+              // 带 name 且无 index/id：同名已在槽 → 续帧；新名字 → 新槽。
+              // （厂商每帧重发全名时若不按此判定，第二个工具会错误并入末槽）
+              const found = toolCalls.findIndex((t) => t.name === tc.function!.name);
+              idx = found >= 0 ? found : toolCalls.length;
+            } else if (openedThisFrame > 0) {
+              // 同帧内无 name 的后续项：按「尚未闭合的槽」顺序配对，避免新开空槽
+              idx = firstUnclosedSlot(toolCalls, openedThisFrame - 1);
             } else {
-              // 无 index 无 id：归入最后一个槽（单工具场景的后续增量帧）
-              idx = toolCalls.length > 0 ? toolCalls.length - 1 : 0;
+              // 无 index / 无 id / 无 name 的帧内首项：优先续接「尚未闭合」的槽。
+              // 原实现一律并入末槽，导致并行工具调用塌成一个：
+              //   name 拼成 "readsearch"、arguments 串成 '{"path":"a"{"pattern":"x"}}'
+              //   → unknown tool + JSON 解析失败，多工具调用整体报废（B1）。
+              const open = toolCalls.findIndex((t) => t.arguments.length > 0 && !isJsonBalanced(t.arguments));
+              idx = open >= 0 ? open : toolCalls.length;
             }
+            openedThisFrame++;
             while (toolCalls.length <= idx) {
               toolCalls.push({ id: '', name: '', arguments: '' });
             }
@@ -352,6 +369,55 @@ interface RetryableError extends Error {
  *  非 global regex：exec 总是从头匹配，循环内天然取「最靠前的分隔符」。 */
 const SSE_FRAME_SEP = /\r\n\r\n|\n\n|\r\r/;
 const SSE_LINE_SEP = /\r\n|\r|\n/;
+
+/**
+ * 判断一段（可能尚在流式接收中的）arguments 是否已闭合。
+ * 用途：厂商不下发 index/id 时区分「同一工具调用的续帧」与「新工具调用的首帧」。
+ * 只做括号配对 + 字符串转义感知的轻量扫描；不做完整 JSON.parse（增量帧必然解析失败，
+ * 这里只需要判断「还没收完」）。无法判定时按未闭合处理，宁可多续一帧也不错开新槽。
+ */
+export function isJsonBalanced(raw: string): boolean {
+  const s = raw.trim();
+  if (!s) return false;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const ch of s) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      if (inString) escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') depth--;
+  }
+  // 括号配对且不在字符串中才算闭合（inString=true 说明字符串被截断）
+  return depth === 0 && !inString;
+}
+
+/**
+ * 找到第 n 个「arguments 尚未闭合」的槽位下标；不足 n+1 个则返回末尾新槽下标。
+ * 用于厂商不下发 index/id 时，把无 name 的续帧片段按顺序配对回各并行槽。
+ */
+function firstUnclosedSlot(slots: Array<{ arguments: string }>, n: number): number {
+  let seen = 0;
+  for (let i = 0; i < slots.length; i++) {
+    const s = slots[i] as { arguments: string };
+    if (s.arguments.length > 0 && !isJsonBalanced(s.arguments)) {
+      if (seen === n) return i;
+      seen++;
+    }
+  }
+  return slots.length;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
