@@ -320,6 +320,30 @@ describe('M2: git 分级与 worktree', () => {
     expect(r.result.ok).toBe(true);
   });
 
+  // B2 回归：主进程把网关颁发的 approvalToken 放在**顶层**透传（与 args.preAuthorized
+  // 不同的通道）。此前 runtime.ts 只给 terminal 透传令牌，git 写操作即使审批通过也会
+  // 被这里的门禁以 4001 拒绝 —— 批准的 commit 永远失败。此用例锁定顶层令牌通道。
+  it('git 写 op 携带顶层 approvalToken 即放行（B2 契约）', async () => {
+    const { execSync } = await import('child_process');
+    execSync('git init -q', { cwd: ws });
+    execSync('git config user.email t@t', { cwd: ws });
+    execSync('git config user.name t', { cwd: ws });
+    fs.writeFileSync(path.join(ws, 'b2.txt'), 'b2');
+    execSync('git add .', { cwd: ws });
+    const r = await h.call('git.exec', {
+      op: 'commit',
+      args: { message: '[task-b2] top-level token' },
+      approvalToken: 'granted-by-gateway',
+    });
+    expect(r.result.ok).toBe(true);
+  });
+
+  it('term.exec 高危命令必须带放行凭据', async () => {
+    const noToken = await h.call('term.exec', { command: 'rm -rf /tmp/codara-should-not-exist' });
+    expect(noToken.result.ok).toBe(false);
+    expect(noToken.result.error.code).toBe(3001);
+  });
+
   it('worktree 创建使用 codara/ 前缀命名', async () => {
     const { execSync } = await import('child_process');
     execSync('git init -q', { cwd: ws });
