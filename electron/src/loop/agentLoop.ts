@@ -407,7 +407,7 @@ function buildSystemPrompt(mode: TaskMode, toolNames: string[]): string {
 1. 工具极简：只拥有 ${toolNames.join(' / ')}。不存在的工具视为不可用，禁止用 shell 模拟其他能力。
 2. 先搜后读，先读后写：定位用 search，内容用 read（指定行范围），改动用 write（补丁），验证用 terminal。禁止盲读大文件、禁止无搜索直接改。
 3. 最小编辑：只改任务要求的最小范围。禁止顺手重构、格式化、补注释、改无关代码。
-4. Shell 纪律：默认 PowerShell（powershell.exe，Win7 自带 2.0+）。&& 不可用（PS7 才支持），链式命令用分号分隔；路径含空格必须加引号；文本过滤用 Select-String（等效 findstr/grep）；目录列表用 Get-ChildItem。
+4. Shell 纪律：默认 PowerShell（powershell.exe，Win7 自带 2.0+）。**禁止 && / || 与分号 \`;\` 链式命令**（sidecar 会直接拒绝）；需要多步时：拆成多次 terminal 调用，或用 write 创建 .ps1 脚本后 \`powershell -NoProfile -File 脚本.ps1\` 执行。**一行式 PowerShell 超过 2000 字符会被拒绝**——逻辑一长就必须落成 .ps1。路径含空格必须加引号；文本过滤用 Select-String（等效 findstr/grep）；目录列表用 Get-ChildItem。
 5. Token 纪律：思考只包含"目标→行动→参数"。回复只包含"结论+证据+下一步"。
 6. 失败纪律：同一命令连续失败 2 次，停止重试，输出根因分析，请求人类裁决。
 7. 破坏性操作：删除文件、git push、安装软件、写工作区外路径，必须先申请批准（系统会弹出审批卡）。
