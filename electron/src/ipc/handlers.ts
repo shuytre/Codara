@@ -4,7 +4,7 @@ import * as http from 'http';
 import * as https from 'https';
 import * as path from 'path';
 import { BrowserWindow, dialog, ipcMain } from 'electron';
-import { z }n from 'zod';
+import { z } from 'zod';
 import {
   ApprovalCard,
   ApprovalRespondPayload,
