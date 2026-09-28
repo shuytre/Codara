@@ -222,8 +222,7 @@ pub fn session_list(state: &mut AppState, params: Value) -> Envelope {
     }
 }
 
-pub fn msg_list(state: &mut AppState, params: Value) -> Envelope {
-    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+pub fn msg_list(state: &mut AppState, params: Value) -> Envelope {    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "sessionId is required"),
     };
