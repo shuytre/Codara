@@ -257,12 +257,18 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   });
 
   // 新建对话：切换新会话（原会话消息仍在 sidecar 中），清空 AgentLoop 工作记忆
-  ipcMain.handle(IPC.chatNew, async (): Promise<{ ok: boolean; sessionId?: string; error?: string }> => {
+  ipcMain.handle(
+    IPC.chatNew,
+    async (_e, payload?: unknown): Promise<{ ok: boolean; sessionId?: string; error?: string }> => {
     try {
+      // 标题优先用首条用户消息前 24 字：左栏列表才有可辨识的标题，
+      // 否则一屏全是「对话 2026/9/28 18:49」这种无信息量的时间戳。
+      const raw = (payload as { title?: unknown } | undefined)?.title;
+      const title = typeof raw === 'string' ? raw.trim().slice(0, 24) : '';
       deps.loop.abort();
       gateway.setGoalPreAuthorized(false);
       deps.loop.reset();
-      const sess = await sidecar.call('session.create', { kind: 'main', title: `对话 ${new Date().toLocaleString('zh-CN')}` });
+      const sess = await sidecar.call('session.create', { kind: 'main', title: title || `对话 ${new Date().toLocaleString('zh-CN')}` });
       const data = sess.data as { sessionId?: string } | undefined;
       if (sess.ok && data?.sessionId) {
         deps.loop.attachMainSession(String(data.sessionId));
@@ -349,6 +355,53 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   // 主对话原点会话 id（启动时创建；chatNew 换会话不影响原点，左栏「主对话」回切用）
   ipcMain.handle(IPC.chatMainSession, async (): Promise<{ sessionId: string | null }> => {
     return { sessionId: deps.loop.getMainSessionId() };
+  });
+
+  // 历史会话列表（左栏对话列表数据源）。
+  // 之前渲染层的 convs.list 是纯内存的：应用一重启就只剩「主对话」，用户以为
+  // 「对话记录丢了」。会话其实一直在 sidecar 的 sqlite 里，补一条读取 RPC 即可。
+  ipcMain.handle(
+    IPC.chatList,
+    async (): Promise<{
+      ok: boolean;
+      sessions: Array<{ sessionId: string; title: string | null; createdAt: number }>;
+      error?: string;
+    }> => {
+    try {
+      const res = await sidecar.call('session.list', { kind: 'main', limit: 200 });
+      if (!res.ok) return { ok: false, sessions: [], error: res.error?.message ?? 'session.list failed' };
+      const rows =
+        (res.data as { sessions?: Array<{ sessionId?: unknown; title?: unknown; createdAt?: unknown }> } | undefined)
+          ?.sessions ?? [];
+      return {
+        ok: true,
+        sessions: rows
+          .map((r) => ({
+            sessionId: String(r.sessionId ?? ''),
+            title: r.title == null ? null : String(r.title),
+            createdAt: Number(r.createdAt ?? 0),
+          }))
+          .filter((r) => r.sessionId.length > 0),
+      };
+    } catch (err) {
+      logger.warn('chat list failed', err);
+      return { ok: false, sessions: [], error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // 用首条用户消息回填当前会话标题（左栏可辨识）。
+  // 会话归属由 AgentLoop 持有，渲染层不必知道 sessionId。
+  ipcMain.handle(IPC.chatRename, async (_e, payload: unknown): Promise<boolean> => {
+    try {
+      const title = String((payload as { title?: unknown } | undefined)?.title ?? '').trim();
+      const sid = deps.loop.getMainSessionId();
+      if (!title || !sid) return false;
+      const res = await sidecar.call('session.rename', { sessionId: sid, title: title.slice(0, 24) });
+      return res.ok;
+    } catch (err) {
+      logger.warn('chat rename failed', err);
+      return false;
+    }
   });
 
   // ---------- Goal 预授权（M4，规格 4.7） ----------
