@@ -35,9 +35,17 @@ describe('parseToolArgs', () => {
     expect(parseToolArgs(raw)).toEqual({ path: 'b.txt', edits: [{ newText: 'x' }] });
   });
 
+  it('括号未闭合（截断）→ 补齐后缀后解析（第四轮新增）', () => {
+    expect(parseToolArgs('{"path": "a.txt"')).toEqual({ path: 'a.txt' });
+    expect(parseToolArgs('{"edits":[{"newText":"x"}]')).toEqual({ edits: [{ newText: 'x' }] });
+  });
+
+  it('单引号键值 → 激进修复后解析（第四轮新增）', () => {
+    expect(parseToolArgs("{'path':'a.txt','create':true}")).toEqual({ path: 'a.txt', create: true });
+  });
+
   it('完全不可解析时抛错（错误信息含原文摘要），不再静默返回 {}', () => {
     expect(() => parseToolArgs('这不是 JSON')).toThrow(/不是合法 JSON/);
-    expect(() => parseToolArgs('{"path": "a.txt"')).toThrow(/不是合法 JSON/);
     const thrown = (() => {
       try {
         parseToolArgs('{"broken": true,,}');
