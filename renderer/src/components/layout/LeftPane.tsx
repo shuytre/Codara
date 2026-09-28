@@ -5,6 +5,7 @@ import { createSignal, For, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
 import {
+  addConversation,
   appendEntry,
   cards,
   chat,
@@ -25,42 +26,24 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
     setCards('list', []);
   };
 
-  // 新建对话：主进程建新会话并重置 AgentLoop，渲染层清空聊天流并刷新列表。
-  // 标题由主进程按「对话 <时间>」生成；首条消息到达后 Composer 会调 chatRename 回填。
-  // 列表不等本地推入，而是重新向 sidecar 拉取 —— 单一数据源，重启后一致。
-  const newChat = async () => {
+  // 新建对话：主进程建新会话并重置 AgentLoop，渲染层清空聊天流并入列表（用主进程返回的真实 sessionId）
+  // 以当前输入框里的首行文字作为标题：左栏才可辨识（否则全是「新对话 18:49」）。
+  const newChat = async (title?: string) => {
     if (switching()) return;
     setSwitching(true);
     try {
-      const r = await b.chatNew();
+      const r = await b.chatNew(title ? { title } : undefined);
       if (!r?.ok) throw new Error(r?.error || '新建对话失败');
       clearStream();
-      setActiveConversation(r.sessionId || null);
-      void refreshList();
+      addConversation({
+        sessionId: r.sessionId || `c-${Date.now()}`,
+        title: title?.trim().slice(0, 24) || `新对话 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+        createdAt: Date.now(),
+      });
     } catch (err) {
       setUi({ toast: `新建对话失败：${err instanceof Error ? err.message : String(err)}` });
     } finally {
       setSwitching(false);
-    }
-  };
-
-  // 从 sidecar 拉取会话列表（唯一数据源；重启不丢）
-  const refreshList = async () => {
-    try {
-      const r = await b.chatList();
-      if (!r?.ok) return;
-      setConvs(
-        'list',
-        r.sessions
-          .filter((x) => x.title !== '主对话')
-          .map((x) => ({
-            sessionId: x.sessionId,
-            title: x.title || `对话 ${new Date(x.createdAt).toLocaleString('zh-CN')}`,
-            createdAt: x.createdAt,
-          }))
-      );
-    } catch {
-      /* 列表拉取失败不阻断交互 */
     }
   };
 
@@ -102,7 +85,7 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
     <aside class="left-pane">
       <div class="pane-title">
         对话
-        <button class="icon-btn" title="新建对话" disabled={switching()} onClick={newChat}>
+        <button class="icon-btn" title="新建对话" disabled={switching()} onClick={() => newChat()}>
           <IconPlus />
         </button>
       </div>
