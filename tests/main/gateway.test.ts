@@ -97,3 +97,76 @@ describe('M4: Goal 预授权网关', () => {
     expect(requests.length).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------- 人工审查中间层（2026-09-28 口径）
+//
+// sidecar 已不再对命令内容做任何过滤/改写（cmd_rules 只保留空命令与长度上限两条
+// 工程保护）。安全职责全部由本网关承担，且**审查环节强制保留**：
+//   - 高危命令、读写类命令 → 一律人工审查；
+//   - 危险命令不做额外拦截，同普通审查卡处理（仅标注 risk=high）；
+//   - 只读类（read/search/索引/git 只读）→ 自动放行，不打扰用户。
+describe('人工审查中间层：高危与读写类命令强制审查', () => {
+  it('terminal 一律审查（含只读命令，不再有内容白名单）', async () => {
+    for (const cmd of [
+      'dir',
+      'Get-ChildItem -Force | Select-Object Name',
+      'echo hi',
+      'rm -rf /tmp/x',
+      'format C: /q',
+    ]) {
+      const { gw, requests } = makeGateway(true);
+      const r = await gw.check('terminal', { command: cmd }, 'plan');
+      expect(requests.length, `\`${cmd}\` 必须进入人工审查`).toBe(1);
+      expect(r.allowed).toBe(true);
+    }
+  });
+
+  it('高危命令不额外拦截：同一张普通审查卡，仅标注 risk=high', async () => {
+    const { gw, requests } = makeGateway(true);
+    const r = await gw.check('terminal', { command: 'format C: /q' }, 'plan');
+    expect(requests.length).toBe(1); // 有卡
+    expect(requests[0]!.risk).toBe('high'); // 标注高危
+    expect(r.allowed).toBe(true); // 批准即放行，不被二次拒绝
+  });
+
+  it('读写类命令全部审查：write / git 写操作', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['write', { path: 'a.txt' }],
+      ['git', { op: 'commit' }],
+      ['git', { op: 'push' }],
+      ['git', { op: 'checkout' }],
+    ];
+    for (const [tool, params] of cases) {
+      const { gw, requests } = makeGateway(true);
+      await gw.check(tool, params, 'plan');
+      expect(requests.length, `${tool} ${JSON.stringify(params)} 必须审查`).toBe(1);
+    }
+  });
+
+  it('只读类自动放行：read / search / 索引 / git 只读', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['read', { path: 'a.txt' }],
+      ['search', { pattern: 'x' }],
+      ['index.symbols', { query: 'x' }],
+      ['index.semantic', { query: 'x' }],
+      ['git', { op: 'status' }],
+      ['git', { op: 'diff' }],
+      ['git', { op: 'log' }],
+    ];
+    for (const [tool, params] of cases) {
+      const { gw, requests } = makeGateway(true);
+      const r = await gw.check(tool, params, 'plan');
+      expect(r.allowed, `${tool} 应放行`).toBe(true);
+      expect(requests.length, `${tool} 不应打扰用户`).toBe(0);
+    }
+  });
+
+  it('Goal 模式下高危命令也不例外：预授权不能跳过人工审查', async () => {
+    const { gw, requests } = makeGateway(true);
+    gw.setGoalPreAuthorized(true);
+    const r = await gw.check('terminal', { command: 'Remove-Item -Recurse -Force C:\\temp' }, 'goal');
+    expect(requests.length).toBe(1); // 高危：即使预授权也必弹卡
+    expect(requests[0]!.risk).toBe('high');
+    expect(r.allowed).toBe(true);
+  });
+});
