@@ -23,9 +23,13 @@ export interface CodaraBridge {
   modelsList(payload: ModelsListPayload): Promise<ModelsListResult>;
   chatSend(payload: ChatSendPayload): Promise<boolean>;
   chatAbort(): Promise<boolean>;
-  chatNew(): Promise<{ ok: boolean; sessionId?: string; error?: string }>;
+  chatNew(payload?: { title?: string }): Promise<{ ok: boolean; sessionId?: string; error?: string }>;
   chatSwitch(payload: { sessionId: string }): Promise<{ ok: boolean; error?: string; messages?: Array<{ role: string; content: string }> }>;
   chatMainSession(): Promise<{ sessionId: string | null }>;
+  /** 历史会话列表（左栏对话列表）：直接读 sidecar sessions 表，重启不丢 */
+  chatList(): Promise<ConversationListResult>;
+  /** 用首条用户消息回填当前会话标题 */
+  chatRename(payload: { title: string }): Promise<boolean>;
   approvalRespond(payload: ApprovalRespondPayload): Promise<boolean>;
   usageSnapshot(): Promise<UsageSnapshot>;
   budgetRespond(payload: BudgetRespondPayload): Promise<boolean>;
@@ -63,6 +67,13 @@ export type ChatEventPayload =
   | { kind: 'card'; card: Card }
   | { kind: 'done'; text: string; usage?: unknown };
 
+/** chat:list 响应体：左栏对话列表（元信息，不含消息正文） */
+export interface ConversationListResult {
+  ok: boolean;
+  sessions: Array<{ sessionId: string; title: string | null; createdAt: number }>;
+  error?: string;
+}
+
 declare global {
   interface Window {
     codara?: CodaraBridge;
@@ -97,6 +108,8 @@ export function bridge(): CodaraBridge {
     chatNew: async () => ({ ok: false, error: 'bridge unavailable' }),
     chatSwitch: async () => ({ ok: false, error: 'bridge unavailable' }),
     chatMainSession: async () => ({ sessionId: null }),
+    chatList: async () => ({ ok: false, sessions: [], error: 'bridge unavailable' }),
+    chatRename: async () => false,
     approvalRespond: noop,
     usageSnapshot: async () => ({
       today: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
