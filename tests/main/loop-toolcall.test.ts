@@ -7,7 +7,7 @@
 //  4) 工具失败不终止会话，模型仍有机会完成收尾回答。
 import { describe, expect, it } from 'vitest';
 
-import { AgentLoop } from '../../electron/src/loop/agentLoop';
+import { AgentLoop, parseToolArgs, coerceToolArgs, sanitizeOutgoingMessages } from '../../electron/src/loop/agentLoop';
 import { ToolRuntime } from '../../electron/src/tools/runtime';
 import { ApprovalGateway } from '../../electron/src/tools/gateway';
 
@@ -194,5 +194,154 @@ describe('端到端：工具集与系统提示词一致', () => {
     const names = model.seen[0]!.tools.map((t: any) => t.name);
     expect(names).toContain('git');
     expect(names).toContain('index.symbols');
+  });
+});
+
+// ---------------------------------------------------------------- 第四轮：坏 JSON 参数与对话中断
+//
+// 截图暴露的两个问题：
+//  A) write 连续失败 —— 模型发的 arguments 是 {"create":true,"path":"x.py"}（缺 edits），
+//     或被包成非法 JSON；旧实现只回注「JSON 语法错」，模型无法自纠，原样重发。
+//  B) HTTP 400「Assistant tool call arguments must be valid JSON」—— 坏参数被钉进历史，
+//     此后每轮请求都带毒，接口直接 400，整轮对话中断。
+
+describe('A: parseToolArgs 常见坏形态自修复', () => {
+  it('标准 JSON 正常解析', () => {
+    expect(parseToolArgs('{"path":"a.txt"}')).toEqual({ path: 'a.txt' });
+  });
+
+  it('代码围栏包裹', () => {
+    expect(parseToolArgs('```json\n{"path":"a.txt"}\n```')).toEqual({ path: 'a.txt' });
+  });
+
+  it('前置说明文字', () => {
+    expect(parseToolArgs('好的，我来读取：{"path":"a.txt"}')).toEqual({ path: 'a.txt' });
+  });
+
+  it('尾逗号', () => {
+    expect(parseToolArgs('{"path":"a.txt",}')).toEqual({ path: 'a.txt' });
+  });
+
+  it('单引号键值（弱模型常见非法形态，激进修复）', () => {
+    expect(parseToolArgs("{'path':'a.txt','create':true}")).toEqual({ path: 'a.txt', create: true });
+  });
+
+  it('括号未闭合（截断）自动补齐', () => {
+    expect(parseToolArgs('{"path":"a.txt"')).toEqual({ path: 'a.txt' });
+    expect(parseToolArgs('{"edits":[{"newText":"x"}]')).toEqual({ edits: [{ newText: 'x' }] });
+  });
+
+  it('彻底无法修复时抛错（不能静默当空参数）', () => {
+    expect(() => parseToolArgs('这不是JSON')).toThrow(/不是合法 JSON/);
+  });
+});
+
+describe('A: coerceToolArgs 缺参精确回注', () => {
+  const writeSpec = {
+    name: 'write',
+    description: '',
+    parameters: { type: 'object', required: ['path', 'edits'], properties: { path: { type: 'string', description: '目标路径' }, edits: { type: 'array', description: '编辑项' } } },
+  } as any;
+
+  it('write 且 create=true 仅给 path → 自动补空 edits（建空文件）', () => {
+    const r = coerceToolArgs(writeSpec, { path: 'desktop_pet.py', create: true });
+    expect(r.params).toEqual({ path: 'desktop_pet.py', create: true, edits: [{ newText: '' }] });
+    expect(r.note).toContain('空文件');
+    expect(r.error).toBeUndefined();
+  });
+
+  it('write 且 create≠true 缺 edits → 不兜底，回注精确错误（不覆盖已有文件）', () => {
+    const r = coerceToolArgs(writeSpec, { path: 'a.ts' });
+    expect(r.params).toBeUndefined();
+    expect(r.error).toContain('edits');
+    expect(r.error).toContain('必填');
+    expect(r.error).toContain('正确形状示例');
+  });
+
+  it('必填齐全时原样返回（不打扰）', () => {
+    const p = { path: 'a.txt', edits: [{ newText: 'x' }] };
+    expect(coerceToolArgs(writeSpec, p).params).toBe(p);
+  });
+
+  it('非对象参数回注错误', () => {
+    expect(coerceToolArgs(writeSpec, 'oops').error).toContain('JSON 对象');
+  });
+});
+
+describe('A 端到端: 截图里的 write 缺 edits 不再死循环', () => {
+  it('create=true 仅给 path → 补齐后成功建文件（不再回注错误空转）', async () => {
+    const { calls, cards } = await runLoop([
+      { toolCalls: [{ id: 'c1', name: 'write', arguments: '{"create":true,"path":"desktop_pet.py"}' }] },
+      { content: '已创建' },
+    ]);
+    // 触达 sidecar 并成功
+    expect(calls.some((c) => c.method === 'fs.patch')).toBe(true);
+    expect(cards.some((c) => c.type === 'tool-call' && c.tool === 'write' && c.status === 'done')).toBe(true);
+  });
+
+  it('缺 edits 且非新建 → 回注含正确示例的错误（模型可一次改对）', async () => {
+    const { calls, model } = await runLoop([
+      { toolCalls: [{ id: 'c1', name: 'write', arguments: '{"path":"a.ts"}' }] },
+      { content: '已修正' },
+    ]);
+    expect(calls.filter((c) => c.method === 'fs.patch').length).toBe(0);
+    const toolMsg = model.seen[1]!.messages.find((m: any) => m.role === 'tool' && m.tool_call_id === 'c1');
+    const payload = JSON.parse(toolMsg.content);
+    expect(payload.error).toContain('edits');
+    expect(payload.error).toContain('正确形状示例');
+  });
+});
+
+describe('B: sanitizeOutgoingMessages 发送前清洗历史', () => {
+  it('坏 arguments 被重写为合法 JSON，且 tool_call 不被删除（避免孤立 tool 消息）', () => {
+    const msgs = [
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write', arguments: '{bad json' } }] },
+    ] as any;
+    const out = sanitizeOutgoingMessages(msgs);
+    const args = out[0]!.tool_calls![0]!.function.arguments;
+    expect(() => JSON.parse(args)).not.toThrow();
+    expect(JSON.parse(args).__invalid_arguments__).toContain('{bad json');
+    expect(out[0]!.tool_calls!.length).toBe(1); // 保留配对
+  });
+
+  it('合法 arguments 原样保留', () => {
+    const msgs = [
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read', arguments: '{"path":"a"}' } }] },
+    ] as any;
+    const out = sanitizeOutgoingMessages(msgs);
+    expect(out[0]!.tool_calls![0]!.function.arguments).toBe('{"path":"a"}');
+  });
+
+  it('assistant 带 tool_calls 时 content 空串置 null（严格接口要求）', () => {
+    const msgs = [
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read', arguments: '{}' } }] },
+    ] as any;
+    expect(sanitizeOutgoingMessages(msgs)[0]!.content).toBeNull();
+  });
+
+  it('不改动原数组（历史保留原文供排查）', () => {
+    const bad = '{oops';
+    const msgs = [
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write', arguments: bad } }] },
+    ] as any;
+    sanitizeOutgoingMessages(msgs);
+    expect(msgs[0].tool_calls[0].function.arguments).toBe(bad);
+  });
+
+  it('端到端：坏参数历史被清洗后，第二轮请求里每条 tool_calls.arguments 都是合法 JSON', async () => {
+    const { model } = await runLoop([
+      { toolCalls: [{ id: 'c1', name: 'write', arguments: '{"path":"a.ts"}' }] },
+      { toolCalls: [{ id: 'c2', name: 'read', arguments: '{"path":"a.ts"}' }] },
+      { content: '完成' },
+    ]);
+    // 第二轮请求携带第一轮的 assistant.tool_calls：必须已清洗为合法 JSON
+    const secondReq = model.seen[1]!;
+    const assistants = secondReq.messages.filter((m: any) => m.role === 'assistant' && Array.isArray(m.tool_calls));
+    expect(assistants.length).toBeGreaterThan(0);
+    for (const a of assistants) {
+      for (const tc of a.tool_calls) {
+        expect(() => JSON.parse(tc.function.arguments)).not.toThrow();
+      }
+    }
   });
 });
