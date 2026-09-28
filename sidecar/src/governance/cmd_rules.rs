@@ -1,119 +1,83 @@
-//! 命令纪律校验（gov.validate）：禁 &&/; 长链、PowerShell 最小子集、危险命令识别。
-//! 白名单只是减摩擦层，不是安全边界（ADR-06）：真正的边界是高危审批+快照+审计。
+//! 命令校验（gov.validate）。
+//!
+//! ## 口径（2026-09-28 定稿，由项目方明确指定）
+//!
+//! **sidecar 不对命令内容做任何限制或改写**：不做违禁词过滤、不做 shell 子集约束、
+//! 不做链式命令拦截、不做高危语义识别。模型直接输出终端原始命令，原样执行。
+//!
+//! 安全职责全部上移到 **Electron 侧的人工审查中间层**（`tools/gateway.ts`）：
+//! 高危命令与读写类命令一律提交人工审查，审批通过即放行。审查环节是强制保留的
+//! 唯一防线，sidecar 不再做第二道内容过滤 —— 否则会出现
+//! 「用户点了批准，命令仍被 sidecar 拒绝」这种审批卡沦为无效交互的现象
+//! （历史事故：审批卡显示「已批准」，工具流水里却是 ✗）。
+//!
+//! 因此本模块**只保留两条工程性保护**，它们不是内容审查，而是防止 RPC 层被撑爆：
+//!  1. 空命令  → 不是命令，属缺参，直接拒绝（避免把空串当命令去 spawn 进程）；
+//!  2. 长度上限 → 单条命令超过 2000 字符会撑爆 stdio 行分隔帧，属传输层约束。
+//!
+//! 除这两条外 `validate_command` 恒返回 ok=true，`high_risk` 恒为 false
+//! （风险等级由 gateway 的审查策略判定，不再由 sidecar 复判）。
 use serde_json::{json, Value};
 
 use crate::rpc::envelope::Envelope;
 
-/// 高危命令特征（无条件升级人工审批，M4 沙箱用）
-pub const HIGH_RISK_PATTERNS: &[&str] = &[
-    "rd ", "rmdir", "del ", "erase ", "format ", "diskpart", "shutdown", "reg add", "reg delete",
-    "regedit", "net user", "net localgroup", "icacls", "takeown", "bcdedit", "vssadmin",
-    "cipher /w", "attrib -s -h", "schtasks /create", "sc delete", "taskkill /f",
-    "rm -rf", "mkfs", "dd if=", "chmod 777", "chown", "> /dev/sd", "kill -9 1",
-];
+/// 单条命令长度上限（工程约束，非安全策略）：防止超长命令撑爆 RPC 帧。
+/// 与 Electron 侧 `TERM_CMD_LIMIT` 保持一致。
+pub const CMD_MAX_LEN: usize = 2000;
 
 #[derive(Debug)]
 pub struct ValidateResult {
     pub ok: bool,
     pub code: i64,
     pub message: String,
+    /// 保留字段以维持信封兼容：sidecar 不再做高危识别，恒为 false。
     pub high_risk: bool,
     pub shell: String,
 }
 
-pub fn validate_command(command: &str, platform: &str) -> ValidateResult {
+pub fn validate_command(command: &str, _platform: &str) -> ValidateResult {
     let cmd = command.trim();
     if cmd.is_empty() {
-        return ValidateResult { ok: false, code: crate::rpc::error::CMD_REJECTED, message: "empty command".into(), high_risk: false, shell: "cmd".into() };
+        return ValidateResult {
+            ok: false,
+            code: crate::rpc::error::CMD_REJECTED,
+            message: "empty command".into(),
+            high_risk: false,
+            shell: "cmd".into(),
+        };
     }
-    if cmd.len() > 2000 {
-        return ValidateResult { ok: false, code: crate::rpc::error::CMD_OVERFLOW_BLOCKED, message: "command too long".into(), high_risk: false, shell: "cmd".into() };
+    if cmd.len() > CMD_MAX_LEN {
+        return ValidateResult {
+            ok: false,
+            code: crate::rpc::error::CMD_OVERFLOW_BLOCKED,
+            message: format!("command exceeds {} chars", CMD_MAX_LEN),
+            high_risk: false,
+            shell: "cmd".into(),
+        };
     }
-
-    // 禁 && 与 ; 长链（允许唯一简单管道 findstr）
-    if cmd.contains("&&") || cmd.contains("||") {
-        return ValidateResult { ok: false, code: crate::rpc::error::CMD_REJECTED, message: "chained commands (&&/||) are forbidden; run one command at a time".into(), high_risk: false, shell: "cmd".into() };
-    }
-    for seg in split_semicolons(cmd) {
-        if seg.len() != cmd.len() {
-            return ValidateResult { ok: false, code: crate::rpc::error::CMD_REJECTED, message: "semicolons chaining is forbidden".into(), high_risk: false, shell: "cmd".into() };
-        }
-    }
-
-    // PowerShell 检测与最小子集（Windows 语义）
-    let is_ps = cmd.starts_with("powershell") || cmd.starts_with("pwsh");
-    if platform == "windows" {
-        // 禁用 cmdlet：无论是否带 powershell 前缀（管道进 cmdlet 即违反最小子集）
-        if let Err(msg) = check_ps_forbidden(cmd) {
-            return ValidateResult { ok: false, code: crate::rpc::error::CMD_REJECTED, message: msg, high_risk: false, shell: "powershell".into() };
-        }
-        // 固定前缀模板校验（规格 3.5.2）：仅对显式 powershell/pwsh 调用
-        if is_ps {
-            if !cmd.contains("-NoProfile") {
-                return ValidateResult { ok: false, code: crate::rpc::error::CMD_REJECTED, message: "PowerShell calls must use -NoProfile -NonInteractive prefix".into(), high_risk: false, shell: "powershell".into() };
-            }
-            // 这里曾有一条「一行式 >200 字符且不含 .ps1 就拒绝」的规则，已删除：
-            //  - 它拦的是长度而非危险性：201 字符的正确命令被拒、199 字符的同类命令放行；
-            //  - 222 字符的 Invoke-WebRequest + try/catch 探测命令（真实常见写法）全被误杀，
-            //    表现为 terminal「时好时坏」，且拒绝发生在审批之后（用户批准了也无效）；
-            //  - 长度上限已由上方 `cmd.len() > 2000 → CMD_OVERFLOW_BLOCKED` 统一承担，
-            //    本项在其之后判定永远不可达（死规则）。
-            // 需要多步逻辑时，由提示词引导模型落成 .ps1 后 `-File` 执行；规则层不再加码。
-        }
-    }
-
-    // 高危识别
-    let lower = format!(" {} ", cmd.to_lowercase());
-    let high_risk = HIGH_RISK_PATTERNS.iter().any(|p| lower.contains(p));
-
-    ValidateResult { ok: true, code: 0, message: String::new(), high_risk, shell: if is_ps { "powershell".into() } else { "cmd".into() } }
+    // 其余一律放行：命令内容不做任何过滤/改写。
+    // shell 字段仅作回显（由模型在命令中自行标注所选 shell，此处不做推断）。
+    ValidateResult { ok: true, code: 0, message: String::new(), high_risk: false, shell: detect_shell_hint(cmd) }
 }
 
-fn split_semicolons(cmd: &str) -> Vec<String> {
-    // 简单处理：去掉引号内分号
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_quote: Option<char> = None;
-    for c in cmd.chars() {
-        if in_quote.is_some() && in_quote == Some(c) {
-            in_quote = None;
-            cur.push(c);
-        } else if in_quote.is_none() && (c == '"' || c == '\'') {
-            in_quote = Some(c);
-            cur.push(c);
-        } else if c == ';' && in_quote.is_none() {
-            out.push(cur.clone());
-            cur.clear();
-        } else {
-            cur.push(c);
-        }
-    }
-    out.push(cur);
-    out
-}
-
-fn check_ps_forbidden(cmd: &str) -> Result<(), String> {
-    const FORBIDDEN: &[&str] = &[
-        "format-", "select-object", "where-object", "sort-object", "foreach-object",
-        "$_", "gci", "sl ", "% ", "? ", "cat ", "echo $", "get-content -tail", "gc -tail",
-    ];
-    // 禁用词均为 ASCII，lower 的字节偏移与原文一致（多字节字符处回退用小写词）
+/// 从命令前缀做**只读回显**用的 shell 提示，不影响放行与否。
+/// 模型按约定在命令里用括号标注 shell，例如：
+///   `(PowerShell) Get-ChildItem -Force`
+///   `(CMD) dir /b`
+///   `(Bash) ls -la`
+/// 若带标注则回显标注，否则按可执行名粗判，纯展示用。
+fn detect_shell_hint(cmd: &str) -> String {
     let lower = cmd.to_lowercase();
-    for f in FORBIDDEN {
-        if let Some(pos) = lower.find(f) {
-            let end = pos + f.len();
-            let original: &str = if cmd.is_char_boundary(pos) && cmd.is_char_boundary(end) {
-                &cmd[pos..end]
-            } else {
-                f
-            };
-            return Err(format!(
-                "PowerShell minimal subset violation: `{}` is forbidden in a pipeline",
-                original.trim_end()
-            ));
-        }
+    if lower.contains("(powershell)") || lower.starts_with("powershell") || lower.starts_with("pwsh") {
+        return "powershell".into();
     }
-    Ok(())
+    if lower.contains("(bash)") || lower.starts_with("bash") || lower.starts_with("sh ") {
+        return "bash".into();
+    }
+    if lower.contains("(cmd)") || lower.starts_with("cmd") {
+        return "cmd".into();
+    }
+    "cmd".into()
 }
 
 pub fn gov_validate(params: Value) -> Envelope {
