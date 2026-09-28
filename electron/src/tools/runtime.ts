@@ -97,7 +97,7 @@ export class ToolRuntime {
       },
       {
         name: 'terminal',
-        description: '终端执行（持久会话）。必须给出 command；单条命令；禁止 && / ; 长链；管道仅限简单 findstr。默认 cmd.exe。超时默认 30s 上限 300s。',
+        description: '终端执行（持久会话）。必须给出 command；命令内容不受限制或改写——链式（&& / || / ;）、管道、多行写法均可，由你自主选择 shell（CMD / Bash / PowerShell）并在命令开头用括号标注。每条命令都会弹人工审批卡。超时默认 30s 上限 300s。',
         parameters: {
           type: 'object',
           properties: {
@@ -341,12 +341,11 @@ export class ToolRuntime {
       };
     }
 
-    // terminal 命令纪律预检（前置到审批之前）。
-    // 此前校验只在 sidecar 的 term.exec 里做，而它发生在**审批卡弹出之后**——用户点了
-    // 「批准」，命令仍会被同一条规则拒绝，审批卡变成一次无效交互（截图现象：卡上写着
-    // 「已批准」，工具流水里却是 ✗）。这里把同一套规则前移到主进程：非法命令根本不弹卡，
-    // 直接把「命中哪条规则、怎么改」回注给模型自纠，同时省掉一次无意义的用户打扰。
-    // 规则本体仍保留在 sidecar（它是最终防线，不放宽），这里只是提前告知。
+    // terminal 工程性预检（前置到审批之前）。
+    // 口径：**不做任何命令内容审查**（不设违禁词、不禁链式、不做 shell 子集约束），
+    // 只有一条传输层保护 —— 命令长度上限（防超长命令撑爆 stdio 行分隔 RPC 帧）。
+    // 前置的意义：历史上内容审查发生在审批卡**之后**，用户点了「批准」命令仍被拒，
+    // 审批卡沦为无效交互。现在唯一的前置规则是工程性的、可自纠的，且不打扰用户。
     if (tool === 'terminal') {
       const cmdErr = precheckTerminalCommand(params);
       if (cmdErr) {
@@ -360,7 +359,7 @@ export class ToolRuntime {
       }
     }
 
-    // 权限网关：ask 级操作先审批
+    // 权限网关（人工审查中间层，强制保留）：读写类与高危命令一律弹审批卡
     const gate = await this.gateway.check(tool, params, mode);
     if (!gate.allowed) {
       return {
@@ -529,7 +528,7 @@ export function validateToolParams(tool: string, params: unknown): string | null
   if (params === null || params === undefined || typeof params !== 'object' || Array.isArray(params)) {
     return (
       `工具「${tool}」的参数必须是 JSON 对象，实际收到 ${describeType(params)}。` +
-      `请以 {\"必填参数\":\"值\"} 形式重新调用。`
+      `请以 {"必填参数":"值"} 形式重新调用。`
     );
   }
   const p = params as Record<string, unknown>;
@@ -710,16 +709,27 @@ function safePreview(v: unknown): string {
   }
 }
 
-/** 与 sidecar `governance/cmd_rules.rs` 对齐的命令纪律参数（两侧必须同步修改）。
- *  抽到常量是为了让「主进程预检」与「sidecar 终检」不会再次漂移——上一轮的 bug 正是
- *  提示词教分号、sidecar 禁分号、长度门槛 200 又拦下一行式，三处互不知情。 */
-export const TERM_CMD_LIMIT = 2000; // 与 sidecar 的 CMD_OVERFLOW_BLOCKED 一致
+/** 单条命令长度上限（工程约束，与 sidecar `CMD_MAX_LEN` 一致）。
+ *  这不是内容审查，只是防止超长命令撑爆 stdio 行分隔 RPC 帧。 */
+export const TERM_CMD_LIMIT = 2000;
 
 /**
- * terminal 命令纪律预检：命中即返回可直接回注模型的错误说明，未命中返回 null。
- * 覆盖 sidecar `validate_command` 的四条硬规则（平台无关的那部分）：
- *  1. 空命令   2. 长度溢出   3. &&/|| 链式   4. 引号外分号链式
- * 只做「能给出可自纠建议」的规则；PowerShell 子集、高危识别仍由 sidecar 判定。
+ * terminal 命令预检。
+ *
+ * ## 口径（2026-09-28 定稿）
+ *
+ * **不做任何命令内容过滤或改写**：不禁链式、不做 shell 子集约束、不做违禁词过滤、
+ * 不做高危语义识别、不给等价写法建议。模型输出什么就执行什么。
+ * 安全职责全部交给 `gateway.check()` 的人工审查：高危命令与读写类命令一律弹审批卡，
+ * 用户批准即放行（审查环节强制保留，见 `tools/gateway.ts`）。
+ *
+ * 此前这里堆过 4 条「纪律规则」（链式拦截、分号拦截、PowerShell 子集、长度门槛），
+ * 造成审批卡沦为无效交互：用户点了「批准」，命令仍被这层拒掉。那些规则已全部移除。
+ *
+ * 仅剩第 5 行的**长度上限** —— 它是传输层保护，不是内容审查：超过 2000 字符的
+ * 单行命令会撑爆 sidecar 的 stdio 行分隔帧。
+ *
+ * @returns 命中工程约束时返回可回注模型的说明；否则返回 null（交给审批与执行）
  */
 export function precheckTerminalCommand(params: unknown): string | null {
   const cmd = (params as { command?: unknown } | null | undefined)?.command;
@@ -729,45 +739,12 @@ export function precheckTerminalCommand(params: unknown): string | null {
 
   if (trimmed.length > TERM_CMD_LIMIT) {
     return (
-      `terminal 命令过长（${trimmed.length} 字符，上限 ${TERM_CMD_LIMIT}）。` +
-      '请把逻辑写入 .ps1 脚本文件（先用 write 创建），再用 `powershell -NoProfile -File 脚本.ps1` 执行。'
+      `terminal 命令过长（${trimmed.length} 字符，上限 ${TERM_CMD_LIMIT}，属 RPC 帧保护）。` +
+      '请拆成多次 terminal 调用，或写成脚本文件后执行。'
     );
   }
-  if (trimmed.includes('&&') || trimmed.includes('||')) {
-    return (
-      'terminal 不接受 && / || 链式命令（每种 shell 语义不同，易产生不可预期结果）。' +
-      '请拆成多次 terminal 调用，或写成 .ps1 脚本后一次性执行。'
-    );
-  }
-  // 引号外分号 = 链式。注意引号内分号是合法内容（如 PowerShell 单引号字符串）。
-  if (hasUnquotedSemicolon(trimmed)) {
-    return (
-      'terminal 不接受分号链式命令（`;`）。请拆成多次 terminal 调用；' +
-      '若确需在一处完成多步，请写成 .ps1 脚本（分号在脚本体内不受此限制）后 `-File` 执行。'
-    );
-  }
-  // 显式 powershell 调用必须带 -NoProfile（否则用户 profile 会拖慢/污染执行）
-  const isPs = trimmed.startsWith('powershell') || trimmed.startsWith('pwsh');
-  if (isPs && !trimmed.includes('-NoProfile')) {
-    return 'PowerShell 调用必须带 -NoProfile 前缀，例如 `powershell -NoProfile -Command "..."`。';
-  }
+  // 其余一律放行：命令内容不做任何限制或改写，交由人工审批。
   return null;
-}
-
-/** 判断是否存在「引号之外」的分号（与 sidecar `split_semicolons` 同语义：
- *  单/双引号成对开关，引号内的分号视为内容，不算链式）。 */
-export function hasUnquotedSemicolon(cmd: string): boolean {
-  let quote: string | null = null;
-  for (const ch of cmd) {
-    if (quote && ch === quote) {
-      quote = null;
-    } else if (!quote && (ch === '"' || ch === "'")) {
-      quote = ch;
-    } else if (!quote && ch === ';') {
-      return true;
-    }
-  }
-  return false;
 }
 
 /**
