@@ -540,4 +540,54 @@ describe('M3: 会话隔离', () => {
     expect(ghost.result.ok).toBe(false);
     expect(ghost.result.error.code).toBe(7002);
   });
+
+  // ---- 会话列表落盘（本轮回归）----
+  // 事故现象：应用重启后左栏只剩「主对话」，用户以为「对话记录丢了」。
+  // 根因：渲染层 convs.list 是纯内存的，而 sidecar 虽有 sessions 表却没有
+  // 读取它的 RPC（只有 session.create / msg.append / msg.list）。
+  it('session.list 返回 main 会话且按时间倒序（重启后能读回）', async () => {
+    const before = await h.call('session.list', { kind: 'main' });
+    expect(before.result.ok).toBe(true);
+    const n0 = (before.result.data.sessions as unknown[]).length;
+
+    const a = await h.call('session.create', { kind: 'main', title: '第一个会话' });
+    await new Promise((r) => setTimeout(r, 5)); // 拉开 created_at，验证倒序稳定
+    const b2 = await h.call('session.create', { kind: 'main', title: '第二个会话' });
+    expect(a.result.ok).toBe(true);
+    expect(b2.result.ok).toBe(true);
+
+    const after = await h.call('session.list', { kind: 'main' });
+    expect(after.result.ok).toBe(true);
+    const rows = after.result.data.sessions as Array<{ sessionId: string; title: string; createdAt: number }>;
+    expect(rows.length).toBe(n0 + 2);
+    // 最新创建的在最前
+    expect(rows[0]!.sessionId).toBe(b2.result.data.sessionId);
+    expect(rows[0]!.title).toBe('第二个会话');
+    expect(rows[0]!.createdAt).toBeGreaterThan(0);
+  });
+
+  it('session.list 只列 main，不把 crew 实例会话混进对话列表', async () => {
+    const crew = await h.call('session.create', { kind: 'crew', role: 'developer', taskId: 't-list' });
+    const rows = (await h.call('session.list', { kind: 'main' })).result.data.sessions as Array<{ sessionId: string }>;
+    expect(rows.some((r) => r.sessionId === crew.result.data.sessionId)).toBe(false);
+  });
+
+  it('session.rename 回填标题（首条用户消息 → 左栏可辨识）', async () => {
+    const s = await h.call('session.create', { kind: 'main', title: '对话 2026/9/28 18:49' });
+    const sid = s.result.data.sessionId;
+    const r = await h.call('session.rename', { sessionId: sid, title: '帮我修复工具调用失败' });
+    expect(r.result.ok).toBe(true);
+
+    const rows = (await h.call('session.list', { kind: 'main' })).result.data.sessions as Array<{
+      sessionId: string;
+      title: string;
+    }>;
+    expect(rows.find((x) => x.sessionId === sid)?.title).toBe('帮我修复工具调用失败');
+  });
+
+  it('session.rename 拒绝空标题与不存在的会话', async () => {
+    const s = await h.call('session.create', { kind: 'main', title: 'x' });
+    expect((await h.call('session.rename', { sessionId: s.result.data.sessionId, title: '   ' })).result.ok).toBe(false);
+    expect((await h.call('session.rename', { sessionId: 'sess-ghost', title: 'y' })).result.ok).toBe(false);
+  });
 });
