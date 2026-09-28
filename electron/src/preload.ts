@@ -18,9 +18,11 @@ const api = {
   modelsList: (payload: ModelsListPayload) => ipcRenderer.invoke(IPC.modelsList, payload),
   chatSend: (payload: ChatSendPayload) => ipcRenderer.invoke(IPC.chatSend, payload),
   chatAbort: () => ipcRenderer.invoke(IPC.chatAbort),
-  chatNew: () => ipcRenderer.invoke(IPC.chatNew),
+  chatNew: (payload?: { title?: string }) => ipcRenderer.invoke(IPC.chatNew, payload),
   chatSwitch: (payload: { sessionId: string }) => ipcRenderer.invoke(IPC.chatSwitch, payload),
   chatMainSession: () => ipcRenderer.invoke(IPC.chatMainSession),
+  chatList: () => ipcRenderer.invoke(IPC.chatList),
+  chatRename: (payload: { title: string }) => ipcRenderer.invoke(IPC.chatRename, payload),
   approvalRespond: (payload: { approvalToken: string; approved: boolean }) =>
     ipcRenderer.invoke(IPC.approvalRespond, payload),
   usageSnapshot: () => ipcRenderer.invoke(IPC.usageSnapshot),
