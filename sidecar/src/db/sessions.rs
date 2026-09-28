@@ -134,6 +134,40 @@ pub fn session_rename(state: &mut AppState, params: Value) -> Envelope {
     }
 }
 
+/// 删除会话（左栏右键/悬停删除入口）。
+/// 同事务级联删除该会话的全部 messages，避免留下孤儿行 —— 否则一旦重新读到
+/// 这些孤立 tool 消息，模型接口会以 400 拒绝整个会话（工具调用从此全失败）。
+/// 不特判「主对话」：是否允许删除由上层（渲染层固定项）决定，sidecar 只负责删干净。
+pub fn session_delete(state: &mut AppState, params: Value) -> Envelope {
+    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return Envelope::err(error::INVALID_PARAMS, "sessionId is required"),
+    };
+    let mut conn = match open_conn(state) {
+        Ok(c) => c,
+        Err(e) => return Envelope::err(error::DB_ERROR, e),
+    };
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
+    };
+    // 先删消息，再删会话；任一步失败整体回滚
+    if let Err(e) = tx.execute("DELETE FROM messages WHERE session_id = ?1", rusqlite::params![session_id]) {
+        return Envelope::err(error::DB_ERROR, e.to_string());
+    }
+    let removed = match tx.execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![session_id]) {
+        Ok(n) => n,
+        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
+    };
+    if removed == 0 {
+        return Envelope::err(error::DB_ERROR, "session not found");
+    }
+    if let Err(e) = tx.commit() {
+        return Envelope::err(error::DB_ERROR, e.to_string());
+    }
+    Envelope::ok(json!({ "deleted": removed }))
+}
+
 pub fn msg_append(state: &mut AppState, params: Value) -> Envelope {
     let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
