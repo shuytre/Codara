@@ -61,6 +61,13 @@ export function Composer() {
       setPrecheckOpen(true);
       return;
     }
+    // 首条用户消息作为会话标题回填（左栏才可辨识）。
+    // 只在「本会话还没有任何用户消息」时做一次，避免每条消息都改名。
+    const firstLine = t.split('\n')[0]?.trim() ?? '';
+    const isFirstUserTurn = chat.entries.filter((e) => e.role === 'user').length === 0;
+    if (isFirstUserTurn && firstLine) {
+      void b.chatRename({ title: firstLine.slice(0, 24) }).catch(() => undefined);
+    }
     setText('');
     appendEntry({ id: `u-${Date.now()}`, role: 'user', text: t, createdAt: Date.now() });
     setChat({ streaming: true, streamText: '' });
