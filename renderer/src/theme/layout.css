@@ -40,7 +40,18 @@ button.small { padding: 3px 8px; font-size: 12px; }
 }
 .conv-item:hover { background: var(--bg-hover); color: var(--ink); }
 .conv-item.active { background: var(--ink-black); color: #fff; }
-.conv-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+/* 删除按钮：默认隐藏，悬停会话项才浮现（避免列表视觉噪音） */
+.conv-del {
+  display: none; align-items: center; justify-content: center;
+  width: 20px; height: 20px; flex: none; padding: 0;
+  border: none; border-radius: 6px; background: transparent;
+  color: var(--ink-tertiary); cursor: pointer;
+}
+.conv-item:hover .conv-del { display: flex; }
+.conv-del:hover { background: rgba(220, 38, 38, .12); color: #dc2626; }
+.conv-item.active .conv-del { color: rgba(255, 255, 255, .7); }
+.conv-item.active .conv-del:hover { background: rgba(255, 255, 255, .18); color: #fff; }
 
 /* 中栏 */
 .center-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
