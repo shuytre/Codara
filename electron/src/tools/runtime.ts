@@ -529,7 +529,7 @@ export function validateToolParams(tool: string, params: unknown): string | null
   if (params === null || params === undefined || typeof params !== 'object' || Array.isArray(params)) {
     return (
       `工具「${tool}」的参数必须是 JSON 对象，实际收到 ${describeType(params)}。` +
-      `请以 {"必填参数":"值"} 形式重新调用。`
+      `请以 {\"必填参数\":\"值\"} 形式重新调用。`
     );
   }
   const p = params as Record<string, unknown>;
