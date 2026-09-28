@@ -30,6 +30,8 @@ export interface CodaraBridge {
   chatList(): Promise<ConversationListResult>;
   /** 用首条用户消息回填当前会话标题 */
   chatRename(payload: { title: string }): Promise<boolean>;
+  /** 删除会话（级联删消息）；删除当前会话后主进程回退到主对话 */
+  chatDelete(payload: { sessionId: string }): Promise<{ ok: boolean; error?: string }>;
   approvalRespond(payload: ApprovalRespondPayload): Promise<boolean>;
   usageSnapshot(): Promise<UsageSnapshot>;
   budgetRespond(payload: BudgetRespondPayload): Promise<boolean>;
@@ -110,6 +112,7 @@ export function bridge(): CodaraBridge {
     chatMainSession: async () => ({ sessionId: null }),
     chatList: async () => ({ ok: false, sessions: [], error: 'bridge unavailable' }),
     chatRename: async () => false,
+    chatDelete: async () => ({ ok: false, error: 'bridge unavailable' }),
     approvalRespond: noop,
     usageSnapshot: async () => ({
       today: { promptTokens: 0, completionTokens: 0, costCNY: 0 },
