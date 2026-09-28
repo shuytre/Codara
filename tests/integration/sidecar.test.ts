@@ -188,29 +188,54 @@ describe('M2: terminal 与治理管线', () => {
     expect(r.result.data.stdout).toContain('hello-governance');
   });
 
-  it('禁 && 长链（3001）', async () => {
+  // 口径反转（2026-09-28）：sidecar 不再对命令内容做任何过滤——链式（&& / ; / ||）、
+  // PowerShell 子集、highRisk 识别全部移除。只保留两条工程保护：空命令、长度上限。
+  // 安全职责上移到 Electron 人工审查中间层（每条命令都弹审批卡）。
+  it('&& 链式命令放行（不再拦截）', async () => {
     const r = await h.call('term.exec', { command: 'echo a && echo b' });
-    expect(r.result.ok).toBe(false);
-    expect(r.result.error.code).toBe(3001);
+    expect(r.result.ok).toBe(true);
+    expect(r.result.data.exitCode).toBe(0);
   });
 
-  it('禁 ; 长链（3001）', async () => {
+  it('; 分号链式命令放行（不再拦截）', async () => {
     const r = await h.call('term.exec', { command: 'echo a; echo b' });
-    expect(r.result.ok).toBe(false);
-    expect(r.result.error.code).toBe(3001);
+    expect(r.result.ok).toBe(true);
+    expect(r.result.data.stdout).toContain('a');
   });
 
-  it('PowerShell 子集校验（Windows 语义）', async () => {
-    const r = await h.call('gov.validate', { command: 'Get-ChildItem | Format-Table', platform: 'windows' });
-    expect(r.result.data.ok).toBe(false);
-    expect(r.result.data.message).toContain('Format');
-    const r2 = await h.call('gov.validate', { command: 'Get-ChildItem -Name', platform: 'windows' });
-    expect(r2.result.data.ok).toBe(true);
+  it('gov.validate 不再做内容审查（一律 ok，highRisk 恒为 false）', async () => {
+    // 过去 format-* 会被判「PS 子集违规」、破坏性命令会被标 highRisk；
+    // 现在风险判定已上移网关，sidecar 只做空命令/长度两条检查。
+    for (const cmd of [
+      'Get-ChildItem | Format-Table',
+      'Get-ChildItem | Select-Object Name',
+      'format C: /q',
+      'rm -rf /tmp/x',
+      'Invoke-Expression $c',
+    ]) {
+      const r = await h.call('gov.validate', { command: cmd, platform: 'windows' });
+      expect(r.result.data.ok, `\`${cmd}\` 应被放行`).toBe(true);
+      expect(r.result.data.highRisk, `\`${cmd}\` 不应在 sidecar 层标高危`).toBe(false);
+    }
   });
 
-  it('高危命令标记 highRisk', async () => {
-    const r = await h.call('gov.validate', { command: 'format C: /q', platform: 'windows' });
-    expect(r.result.data.highRisk).toBe(true);
+  it('gov.validate 只留两条工程保护：空命令与长度上限', async () => {
+    const empty = await h.call('gov.validate', { command: '   ', platform: 'windows' });
+    expect(empty.result.data.ok).toBe(false);
+    expect(empty.result.data.message).toContain('empty');
+
+    const over = await h.call('gov.validate', { command: 'x'.repeat(2001), platform: 'windows' });
+    expect(over.result.data.ok).toBe(false);
+    expect(over.result.data.message).toContain('2000');
+  });
+
+  it('gov.validate 回显模型标注的 shell（只读，不参与判定）', async () => {
+    const ps = await h.call('gov.validate', { command: '(PowerShell) Get-ChildItem -Force', platform: 'windows' });
+    expect(ps.result.data.shell).toBe('powershell');
+    const cmd = await h.call('gov.validate', { command: '(CMD) dir /b', platform: 'windows' });
+    expect(cmd.result.data.shell).toBe('cmd');
+    const bash = await h.call('gov.validate', { command: '(Bash) ls -la', platform: 'linux' });
+    expect(bash.result.data.shell).toBe('bash');
   });
 
   it('超长输出落盘 + 首 40 行 + truncated 标记', async () => {
@@ -338,10 +363,13 @@ describe('M2: git 分级与 worktree', () => {
     expect(r.result.ok).toBe(true);
   });
 
-  it('term.exec 高危命令必须带放行凭据', async () => {
-    const noToken = await h.call('term.exec', { command: 'rm -rf /tmp/codara-should-not-exist' });
-    expect(noToken.result.ok).toBe(false);
-    expect(noToken.result.error.code).toBe(3001);
+  // 口径反转（2026-09-28）：sidecar 不再判定高危，也不再要求放行凭据 —— 看门的是
+  // Electron 的人工审查中间层。此前 `high_risk` 为 true 时会以 3001 拒绝无令牌调用，
+  // 现在 `high_risk` 恒为 false，该门禁成为死代码，命令正常执行。
+  it('高危命令在 sidecar 层不再被拒（安全交由人工审查）', async () => {
+    const r = await h.call('term.exec', { command: 'echo would-be-destructive' });
+    expect(r.result.ok).toBe(true);
+    expect(r.result.data.exitCode).toBe(0);
   });
 
   it('worktree 创建使用 codara/ 前缀命名', async () => {
