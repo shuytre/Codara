@@ -11,7 +11,7 @@ const MODE_OPTIONS: Array<{ id: 'ask' | 'plan' | 'goal'; label: string; tip: str
   { id: 'plan', label: '标准模式（全工具）', tip: '全工具可用，先计划后执行' },
 ];
 
-/** 工作区显示名：只取最后一级目录（C:\你好 → 你好）；盘符根原样显示 */
+/** 工作区显示名：只取最后一级目录（C:\\你好 → 你好）；盘符根原样显示 */
 const wsName = (p: string) => {
   const parts = p.split(/[\\/]+/).filter(Boolean);
   return parts.length > 1 ? parts[parts.length - 1] : p;
