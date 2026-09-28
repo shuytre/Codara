@@ -341,11 +341,12 @@ export class ToolRuntime {
       };
     }
 
-    // terminal 工程性预检（前置到审批之前）。
-    // 口径：**不做任何命令内容审查**（不设违禁词、不禁链式、不做 shell 子集约束），
-    // 只有一条传输层保护 —— 命令长度上限（防超长命令撑爆 stdio 行分隔 RPC 帧）。
-    // 前置的意义：历史上内容审查发生在审批卡**之后**，用户点了「批准」命令仍被拒，
-    // 审批卡沦为无效交互。现在唯一的前置规则是工程性的、可自纠的，且不打扰用户。
+    // terminal 命令纪律预检（前置到审批之前）。
+    // 此前校验只在 sidecar 的 term.exec 里做，而它发生在**审批卡弹出之后**——用户点了
+    // 「批准」，命令仍会被同一条规则拒绝，审批卡变成一次无效交互（截图现象：卡上写着
+    // 「已批准」，工具流水里却是 ✗）。这里把同一套规则前移到主进程：非法命令根本不弹卡，
+    // 直接把「命中哪条规则、怎么改」回注给模型自纠，同时省掉一次无意义的用户打扰。
+    // 规则本体仍保留在 sidecar（它是最终防线，不放宽），这里只是提前告知。
     if (tool === 'terminal') {
       const cmdErr = precheckTerminalCommand(params);
       if (cmdErr) {
@@ -359,7 +360,7 @@ export class ToolRuntime {
       }
     }
 
-    // 权限网关（人工审查中间层，强制保留）：读写类与高危命令一律弹审批卡
+    // 权限网关：ask 级操作先审批
     const gate = await this.gateway.check(tool, params, mode);
     if (!gate.allowed) {
       return {
