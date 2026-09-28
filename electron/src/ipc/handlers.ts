@@ -404,6 +404,31 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     }
   });
 
+  // 删除会话：级联删掉 sidecar 里的 sessions + messages 行。
+  // 若删的正是当前绑定的会话，必须同时把 AgentLoop 的上下文清掉并回退到主对话，
+  // 否则后续消息仍会写到已删除的 sessionId 上（写入静默失败）或读到悬空上下文。
+  ipcMain.handle(
+    IPC.chatDelete,
+    async (_e, payload: unknown): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const p = z.object({ sessionId: z.string().min(1) }).parse(payload);
+      const wasActive = deps.loop.getActiveSessionId() === p.sessionId;
+      const res = await sidecar.call('session.delete', { sessionId: p.sessionId });
+      if (!res.ok) return { ok: false, error: res.error?.message ?? 'session.delete failed' };
+      if (wasActive) {
+        // 回退到主对话原点：清空工作记忆并重新绑定原点会话（若有）
+        deps.loop.abort();
+        gateway.setGoalPreAuthorized(false);
+        deps.loop.reset();
+        deps.loop.detachAndReturnToOrigin(p.sessionId);
+      }
+      return { ok: true };
+    } catch (err) {
+      logger.warn('chat delete failed', err);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   // ---------- Goal 预授权（M4，规格 4.7） ----------
   ipcMain.handle(IPC.goalPreauthorize, async (_e, payload: unknown): Promise<boolean> => {
     const p = GoalPreauthorizeSchema.parse(payload);
