@@ -833,7 +833,12 @@ export function normalizeWriteParams(raw: unknown): WriteParams | null {
     const e = item as Record<string, unknown>;
 
     const oldText = firstString(e, ['oldText', 'old_text', 'old', 'search', 'find']);
-    const newText = firstString(e, ['newText', 'new_text', 'new', 'replace', 'content', 'text']);
+    // newText 允许空串（新建空文件）；但只有**显式给了 newText 键**才算识别到编辑项，
+    // 避免把 {"foo":"bar"} 这种未知形态误当空文件写入。
+    const hasNewKey = ['newText', 'new_text', 'new', 'replace', 'content', 'text'].some((k) => typeof e[k] === 'string');
+    const newText = hasNewKey
+      ? firstStringAllowEmpty(e, ['newText', 'new_text', 'new', 'replace', 'content', 'text'])
+      : undefined;
     const insertAfter = firstString(e, ['insertAfter', 'insert_after', 'after']);
     const insertBefore = firstString(e, ['insertBefore', 'insert_before', 'before']);
 
@@ -893,6 +898,19 @@ function firstString(o: Record<string, unknown>, keys: string[]): string | undef
   for (const k of keys) {
     const v = o[k];
     if (typeof v === 'string' && v.length > 0) return v;
+  }
+  return undefined;
+}
+
+/**
+ * 与 firstString 相同，但允许空字符串。
+ * 仅用于 `newText`：「新建空文件」是合法意图（edits:[{newText:""}]），
+ * 若按 firstString 过滤掉空串，会被误判为「无可识别编辑项」而拒绝。
+ */
+function firstStringAllowEmpty(o: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === 'string') return v;
   }
   return undefined;
 }
