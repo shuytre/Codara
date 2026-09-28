@@ -1,31 +1,31 @@
-// terminal 命令纪律与退出码语义回归测试（C1 / C2 / C3）
+// terminal 命令处理与退出码语义回归测试
 //
-// 背景（三条真实缺陷，全部来自线上截图复现）：
-//  - C1 规则自相矛盾：提示词第 4 条教模型「链式命令用分号分隔」，而 sidecar 的
-//       `validate_command` 恰恰**拒绝**引号外分号；模型照提示词写，命令必被拒。
-//  - C2 长度门槛误杀正确命令：`>200 字符且不含 .ps1 → 拒绝` 是**长度**规则而非
-//      危险性规则。222 字符的 Invoke-WebRequest + try/catch 探测（真实常见写法）
-//      被全量误杀；201 字符被拒而 199 字符放行。表现为 terminal「时好时坏」。
-//  - C3 审批后仍失败：上述校验发生在**审批卡弹出之后**，用户点了「批准」，
-//      命令照样被同一条规则拒绝 —— 审批卡变成无效交互（截图：卡上「已批准」，
-//      工具流里却 ✗）。
+// ============================ 口径反转（2026-09-28，最终定稿） ============================
+// 本文件此前记录的是「白名单减摩擦层」思路。该思路已被推翻，原因是它连续造成三轮线上
+// 事故 —— 每一轮都是「拦写法不拦危险性」，且拒绝都发生在**审批通过之后**，使审批卡沦为
+// 无效交互（用户点了「批准」，工具流里却是 ✗）：
+//  - 只读管道被误杀：`Get-ChildItem -Force | Select-Object Name` 因 select-object 在黑名单里；
+//  - 长度门槛误杀：222 字符的 Invoke-WebRequest + try/catch 探测被拒；
+//  - 链式/分号/前缀禁令与提示词互相矛盾，模型照提示词写必被拒。
+//
+// 新口径：**命令内容不做任何限制或改写**。
+//  - sidecar `validate_command` 只保留两条工程保护：空命令、长度上限（防 RPC 帧撑爆）；
+//  - Electron `precheckTerminalCommand` 同样只保留长度上限；
+//  - 安全职责全部交给**强制保留的人工审查中间层**（tools/gateway.ts）：
+//    高危命令 + 读写类命令一律弹审批卡，危险命令不额外拦截、同普通卡处理；
+//  - 模型自主选定 shell 并用括号标注（如 `(PowerShell) ...`），标注不改写、不校验。
+//
+// 保留下来的这批用例，除「内容过滤已移除」外，还覆盖一个仍然成立的关键修复：
 //  - C4 失败被当成成功：sidecar 遵循规格 3.3.4「退出码优先」，命令执行失败
 //      （exitCode≠0 / 超时 124）仍返回 `ok=true`，失败信息只在 data.exitCode/stderr。
-//      主进程此前只看 `env.ok`，于是**失败的命令被标成「完成」**，模型据此以为
-//      跑通了并继续推理，产出「已验证」式幻觉。
-//
-// 修复策略（对应用户拍板的方案）：
-//  - 放宽长度门槛 + 消解矛盾：删掉 >200 的 PS 一行式规则（长度上限统一由
-//    sidecar 的 2000 字符 CMD_OVERFLOW_BLOCKED 承担）；提示词改为禁 `;` 链式。
-//  - 校验前置到审批前：主进程 `precheckTerminalCommand` 与 sidecar 同规则、
-//    同语义，非法命令**不弹卡**，直接把可自纠的说明回注模型。
-//  - 退出码提升为业务失败：`promoteTerminalExit` 把 exitCode≠0 / 124 转成
-//    ok=false（3001 CMD_REJECTED / 2002 TERM_TIMEOUT），并**保留 data**。
+//      主进程只认 `env.ok` 时会把**失败的命令标成「完成」**，模型据此以为跑通了并继续
+//      推理，产出「已验证」式幻觉。`promoteTerminalExit` 把它如实转为 ok=false。
+//      这是「如实上报」，不是内容过滤，因此保留。
+// =========================================================================================
 import { describe, expect, it } from 'vitest';
 
 import {
   ToolRuntime,
-  hasUnquotedSemicolon,
   precheckTerminalCommand,
   promoteTerminalExit,
   TERM_CMD_LIMIT,
@@ -52,10 +52,9 @@ describe('C1/C2: precheckTerminalCommand 命令纪律预检', () => {
     expect(precheckTerminalCommand({ command: cmd })).toBeNull();
   });
 
-  it('超过 TERM_CMD_LIMIT 的命令给出「落成 .ps1」建议', () => {
+  it('超过 TERM_CMD_LIMIT 只给帧保护提示（不涉及内容审查）', () => {
     const msg = precheckTerminalCommand({ command: 'x'.repeat(TERM_CMD_LIMIT + 1) });
     expect(msg).not.toBeNull();
-    expect(msg).toContain('.ps1');
     expect(msg).toContain(String(TERM_CMD_LIMIT));
   });
 
@@ -63,25 +62,39 @@ describe('C1/C2: precheckTerminalCommand 命令纪律预检', () => {
     expect(precheckTerminalCommand({ command: 'x'.repeat(TERM_CMD_LIMIT) })).toBeNull();
   });
 
-  it('&& / || 链式被拒并提示拆分或脚本化', () => {
-    expect(precheckTerminalCommand({ command: 'cd a && dir' })).toMatch(/&&|\|\||\.ps1/);
-    expect(precheckTerminalCommand({ command: 'a || b' })).toMatch(/&&|\|\||\.ps1/);
+  // 口径反转（2026-09-28）：命令内容不做任何限制或改写。
+  // 链式、分号、shell 前缀此前都会被这一层拒掉，导致审批卡沦为无效交互
+  // （用户点了「批准」，命令仍被拒）。现在全部放行，交由人工审查。
+  it('&& / || 链式命令放行（不再拦截）', () => {
+    expect(precheckTerminalCommand({ command: 'cd a && dir' })).toBeNull();
+    expect(precheckTerminalCommand({ command: 'a || b' })).toBeNull();
   });
 
-  it('引号外分号链式被拒（C1 矛盾消解：提示词与规则一致）', () => {
-    const msg = precheckTerminalCommand({ command: 'cd /d C:\\x; dir' });
-    expect(msg).not.toBeNull();
-    expect(msg).toContain('.ps1');
+  it('引号外分号链式放行（不再拦截）', () => {
+    expect(precheckTerminalCommand({ command: 'cd /d C:\\x; dir' })).toBeNull();
   });
 
-  it('引号内的分号是内容而非链式，放行', () => {
+  it('引号内的分号同样放行', () => {
     expect(precheckTerminalCommand({ command: `powershell -NoProfile -Command "a; b"` })).toBeNull();
   });
 
-  it('显式 powershell 调用缺 -NoProfile 被拒', () => {
-    const msg = precheckTerminalCommand({ command: 'powershell -Command "dir"' });
-    expect(msg).not.toBeNull();
-    expect(msg).toContain('-NoProfile');
+  it('PowerShell 不带 -NoProfile 放行（不再强制前缀）', () => {
+    expect(precheckTerminalCommand({ command: 'powershell -Command "dir"' })).toBeNull();
+  });
+
+  it('任意命令内容都放行：违禁词、Format-*、Invoke-Expression、破坏性命令', () => {
+    for (const cmd of [
+      'Get-ChildItem | Format-Table',
+      'Set-ExecutionPolicy Bypass',
+      'Invoke-Expression $c',
+      'echo $env:PATH',
+      'rm -rf /tmp/x',
+      'format C: /q',
+      'del /f /s /q D:\\data',
+      'Get-ChildItem -Force | Select-Object Name',
+    ]) {
+      expect(precheckTerminalCommand({ command: cmd })).toBeNull();
+    }
   });
 
   it('非字符串 command 返回 null（交由参数校验兜底，避免重复报错）', () => {
@@ -90,22 +103,8 @@ describe('C1/C2: precheckTerminalCommand 命令纪律预检', () => {
   });
 });
 
-describe('hasUnquotedSemicolon 引号感知', () => {
-  it('识别引号外分号', () => {
-    expect(hasUnquotedSemicolon('a; b')).toBe(true);
-    expect(hasUnquotedSemicolon('a;b;c')).toBe(true);
-  });
-
-  it('忽略成对引号内的分号', () => {
-    expect(hasUnquotedSemicolon(`"a; b"`)).toBe(false);
-    expect(hasUnquotedSemicolon(`'a; b'`)).toBe(false);
-    expect(hasUnquotedSemicolon(`cmd "x; y" z`)).toBe(false);
-  });
-
-  it('引号闭合后的分号仍算链式', () => {
-    expect(hasUnquotedSemicolon(`echo "x"; dir`)).toBe(true);
-  });
-});
+// 说明：hasUnquotedSemicolon 已随「分号链式拦截」一并移除 ——
+// 分号不再被拦截，故引号感知逻辑也无存在意义。
 
 // ---------------------------------------------------------------- 单元：退出码提升
 
@@ -182,22 +181,23 @@ function makeRt(opts: RtOptions = {}) {
   };
 }
 
-describe('C2/C3: 校验前置到审批前（审批卡不再无效）', () => {
-  it('非法命令不弹审批卡、不调用 sidecar，直接回注可自纠错误', async () => {
+describe('C2/C3: 审批卡不再无效交互', () => {
+  it('过去被拒的合法命令现在正常弹卡 → 批准 → 执行', async () => {
+    // 回归核心：`cd /d C:\\x; dir` 以前弹了卡、用户批准后仍被拒（无效交互）。
+    // 新口径下内容不再被审查，批准即执行。
     const { rt, calls, approvals } = makeRt();
     const r = await rt.execute('terminal', { command: 'cd /d C:\\x; dir' }, 'plan');
-    expect(r.ok).toBe(false);
-    expect(r.error?.code).toBe(3001);
-    expect(r.error?.message).toContain('.ps1');
-    expect(approvals.length).toBe(0); // 关键：没有打扰用户
-    expect(calls.length).toBe(0); // 关键：没有打到 sidecar
+    expect(r.ok).toBe(true);
+    expect(approvals.length).toBeGreaterThan(0); // 走了人工审查
+    expect(calls.find((c) => c.method === 'term.exec')).toBeTruthy(); // 真的执行了
   });
 
-  it('超长命令同样被前置拦截', async () => {
-    const { rt, calls } = makeRt();
+  it('超长命令仍被前置拦截（唯一的工程性约束）', async () => {
+    const { rt, calls, approvals } = makeRt();
     const r = await rt.execute('terminal', { command: 'x'.repeat(TERM_CMD_LIMIT + 5) }, 'plan');
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe(3001);
+    expect(approvals.length).toBe(0); // 超长命令不打扰用户
     expect(calls.length).toBe(0);
   });
 
@@ -229,5 +229,60 @@ describe('C4 集成: 失败命令不再渲染为成功', () => {
     const { rt } = makeRt({ handler: () => ({ ok: true, data: { exitCode: 0, stdout: 'ok' } }) });
     const r = await rt.execute('terminal', { command: 'dir' }, 'plan');
     expect(r.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- C5：只读管道误杀（本轮）
+//
+// 事故现象（第三轮截图）：`Get-ChildItem -Force | Select-Object Name` 执行后 ✗。
+// 根因：sidecar `check_ps_forbidden` 的禁用词表把只读、无副作用的管道 cmdlet
+// （select-object / where-object / sort-object / foreach-object / gci / cat / % / ?）
+// 一并列为禁用，导致**最常用的目录浏览写法**被判「最小子集违规」。
+// 这是「拦写法不拦危险性」的第二次踩坑（第一次是 >200 字符长度规则）。
+//
+// 修复：禁用词表只保留有副作用/语义模糊的写法（Format-* / Set-ExecutionPolicy /
+// Invoke-Expression / $env: / echo $ …），且每条都附带等价写法建议，使其可自纠。
+describe('C5: PowerShell 只读管道放行', () => {
+  const ALLOWED = [
+    'Get-ChildItem -Force | Select-Object Name',
+    'Get-ChildItem -Recurse | Where-Object { $PSItem.Length -gt 0 }',
+    'Get-Process | Sort-Object CPU -Descending',
+    'gci -Recurse *.rs | Select-Object -First 20',
+    'Get-Content src/main.rs | Select-String todo',
+    'powershell -NoProfile -Command "Get-ChildItem | Select-Object Name"',
+  ];
+
+  for (const cmd of ALLOWED) {
+    it(`放行只读管道：${cmd.slice(0, 44)}`, () => {
+      expect(precheckTerminalCommand({ command: cmd })).toBeNull();
+    });
+  }
+
+  it('select-object 不再出现在拒绝理由里（精确回归）', () => {
+    const msg = precheckTerminalCommand({
+      command: 'powershell -NoProfile -Command "Get-ChildItem | Select-Object Name"',
+    });
+    expect(msg).toBeNull();
+  });
+
+  it('有副作用的写法同样放行（不再有内容审查）', () => {
+    // 旧实现会拦 Format-* / Set-ExecutionPolicy / Invoke-Expression；
+    // 新口径下 sidecar 不做内容审查，这一层也不拦，全部交由人工审查。
+    for (const cmd of [
+      'powershell -NoProfile -Command "Get-ChildItem | Format-Table"',
+      'powershell -NoProfile -Command "Set-ExecutionPolicy Bypass"',
+      'powershell -NoProfile -Command "Invoke-Expression $c"',
+    ]) {
+      expect(precheckTerminalCommand({ command: cmd })).toBeNull();
+    }
+  });
+
+  it('所有终端命令都进入人工审查（不再有预检放行）', async () => {
+    // 关键行为变更：以前只读管道能"跳过审批直接执行"，现在**每条命令都过审查卡**。
+    // 这是「人工审查中间层强制保留」的直接体现。
+    const { rt, calls } = makeRt();
+    const r = await rt.execute('terminal', { command: 'Get-ChildItem -Force | Select-Object Name' }, 'plan');
+    expect(r.ok).toBe(true);
+    expect(calls.find((c) => c.method === 'term.exec')).toBeTruthy();
   });
 });
