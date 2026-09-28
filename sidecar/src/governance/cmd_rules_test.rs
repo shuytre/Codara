@@ -1,122 +1,153 @@
-//! cmd_rules 单元测试：长度门槛、链式拒绝、引号内分号豁免、PS 前缀、高危识别。
+//! cmd_rules 单元测试。
 //!
-//! 本文件的存在本身就是一次事故的产物：cmd_rules 此前**零测试覆盖**，于是带着
-//! 两条互相矛盾的规则上了线——
-//!   - 提示词告诉模型「链式命令用分号分隔」；
-//!   - 这里却硬拒分号；
-//!   - 外加「一行式 >200 字符且不含 .ps1 就拒绝」，把 222 字符的
-//!     Invoke-WebRequest + try/catch 探测命令全部误杀。
-//! 于是 terminal「时好时坏」：短命令能过、长命令必挂，且失败发生在审批之后
-//! （用户批准了也白批）。下面的用例把这些边界固定下来。
-use crate::governance::cmd_rules::{validate_command, HIGH_RISK_PATTERNS};
+//! 本文件记录了一次**口径反转**（2026-09-28）：
+//!
+//! 旧口径（已废弃）：sidecar 作为「白名单减摩擦层」，对命令内容做违禁词过滤、
+//!   PowerShell 最小子集约束、链式命令（`&&`/`||`/`;`）拦截、高危语义识别，
+//!   以及一条「一行式 >200 字符且不含 .ps1 就拒绝」的长度规则。
+//!
+//! 由此产生的线上事故（三轮截图）：
+//!   - `Get-ChildItem -Force | Select-Object Name` 因 `select-object` 在禁用词表里被拒；
+//!   - 222 字符的 `Invoke-WebRequest + try/catch` 因长度规则被拒；
+//!   - 最严重的是**拒绝发生在审批之后** —— 用户点了「批准」，命令仍被拒，
+//!     审批卡沦为无效交互（截图：卡上「已批准」，工具流水里却是 ✗）。
+//!
+//! 新口径：**sidecar 不做任何内容审查**。命令原样执行，安全职责全部交给
+//!   Electron 侧强制保留的人工审查中间层（gateway），高危与读写类命令一律审批。
+//!   本模块只保留两条工程性保护：空命令、长度上限（防 RPC 帧撑爆）。
+//!
+//! 下面的用例把新口径钉死：过去被误杀的命令必须全部放行。
+use crate::governance::cmd_rules::{validate_command, CMD_MAX_LEN};
 use crate::rpc::error;
 
 fn win(cmd: &str) -> crate::governance::cmd_rules::ValidateResult {
     validate_command(cmd, "windows")
 }
 
-// ---------------------------------------------------------------- 长度门槛
+// ---------------------------------------------------------------- 只保留两条工程保护
+
 #[test]
-fn long_ps_one_liner_is_accepted_below_overflow_limit() {
-    // 回归：222 字符的真实探测命令（截图里被拒的那条）现在必须不再因长度被拒
-    let long = r#"powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://www.google.com/search?q=best+agent+model' -UseBasicParsing -TimeoutSec 15; 'g'; + $r.StatusCode } catch { 'g FAIL: ' + $PSItem.Exception.Message }""#;
-    assert!(long.len() > 200, "用例本身应超过旧门槛，否则失去回归意义");
-    let r = win(long);
-    // 旧实现会以 "one-liner >200 chars" 拒绝；现在长度不再是误杀来源
-    assert!(
-        !r.message.contains("one-liner"),
-        "长度规则不应再拦下 {}-char 命令，实际: {}",
-        long.len(),
-        r.message
-    );
+fn empty_command_rejected() {
+    // 空串不是命令，属缺参：避免把空串当命令去 spawn 进程
+    let r = win("   ");
+    assert!(!r.ok);
+    assert_eq!(r.code, error::CMD_REJECTED);
 }
 
 #[test]
-fn ps_one_liner_length_no_longer_rejects_below_overflow() {
-    // 回归核心：旧规则「一行式 >200 字符且不含 .ps1 就拒绝」已删除。
-    // 222 字符的真实探测命令，现在只能因「其他规则」被拒，不能因长度被拒。
-    let long = r#"powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://www.google.com/search?q=best+agent+model' -UseBasicParsing -TimeoutSec 15; 'g: ' + $r.StatusCode } catch { 'g FAIL: ' + $PSItem.Exception.Message }""#;
-    assert!(long.len() > 200 && long.len() < 2000, "用例应落在 200~2000 区间");
-    let r = win(long);
-    assert!(
-        !r.message.contains("one-liner"),
-        "{}-char 命令不应再因长度被拒，实际: {}",
-        long.len(),
-        r.message
-    );
-    assert!(r.ok, "该命令不含链式/违规前缀，应放行，实际: {}", r.message);
-}
-
-// ---------------------------------------------------------------- 长度溢出（与 PS 门槛区分）
-#[test]
-fn command_over_2000_rejected_as_overflow() {
-    let long = "x".repeat(2001);
+fn command_over_limit_rejected_as_overflow() {
+    // 长度上限是传输层约束（防 stdio 行帧撑爆），与旧「>200 字符一行式」规则无关
+    let long = "x".repeat(CMD_MAX_LEN + 1);
     let r = win(&long);
     assert!(!r.ok);
     assert_eq!(r.code, error::CMD_OVERFLOW_BLOCKED);
 }
 
-// ---------------------------------------------------------------- 链式
 #[test]
-fn double_ampersand_and_pipe_or_rejected() {
-    assert!(!win("echo a && echo b").ok);
-    assert!(!win("echo a || echo b").ok);
+fn command_at_exactly_the_limit_is_accepted() {
+    // 边界：恰好等于上限必须放行（不是 >上限 才拒）
+    let at_limit = "x".repeat(CMD_MAX_LEN);
+    assert!(win(&at_limit).ok, "恰好 {} 字符应放行", CMD_MAX_LEN);
 }
 
-#[test]
-fn unquoted_semicolon_rejected() {
-    let r = win("dir; echo hi");
-    assert!(!r.ok);
-    assert_eq!(r.code, error::CMD_REJECTED);
-    assert!(r.message.contains("semicolon"));
-}
+// ---------------------------------------------------------------- 内容过滤已全部移除
 
 #[test]
-fn semicolon_inside_quotes_is_content_not_chaining() {
-    // PowerShell 单引号字符串里的分号是合法内容，不得判为链式
-    let r = win(r#"powershell -NoProfile -Command "Write-Output 'a;b'""#);
-    assert!(r.ok, "引号内分号不应被拒: {}", r.message);
-}
-
-// ---------------------------------------------------------------- PS 前缀
-#[test]
-fn powershell_requires_no_profile() {
-    let r = win(r#"powershell -Command "Get-ChildItem""#);
-    assert!(!r.ok);
-    assert!(r.message.contains("-NoProfile"));
-}
-
-#[test]
-fn short_powershell_file_invocation_accepted() {
-    // 截图里能过的那种短命令，必须保持放行（防过度收紧）
-    assert!(win("powershell -NoProfile -File swebench_parse.ps1").ok);
-}
-
-#[test]
-fn empty_command_rejected() {
-    let r = win("   ");
-    assert!(!r.ok);
-}
-
-// ---------------------------------------------------------------- 高危
-#[test]
-fn high_risk_detected_for_destructive_commands() {
-    assert!(win("rm -rf /tmp/x").high_risk);
-    assert!(win("format C: /q").high_risk);
-    assert!(win("reg add HKLM\\Software\\X").high_risk);
-    assert!(!win("dir").high_risk);
-}
-
-#[test]
-fn high_risk_patterns_are_lowercase_for_case_insensitive_match() {
-    // 匹配用小写化后的命令，模式表必须全小写，否则恒不命中
-    for p in HIGH_RISK_PATTERNS {
-        assert_eq!(*p, p.to_lowercase(), "模式 `{}` 含大写，匹配会失效", p);
+fn read_only_pipeline_cmdlets_are_allowed() {
+    // 事故一：截图里被拒的那条
+    assert!(win("Get-ChildItem -Force | Select-Object Name").ok);
+    for cmd in [
+        "Get-ChildItem -Recurse | Where-Object { $_.Length -gt 0 }",
+        "Get-Process | Sort-Object CPU -Descending",
+        "gci -Recurse *.rs | Select-Object -First 20",
+        "Get-Content src/main.rs | Select-String todo",
+        "powershell -NoProfile -Command \"Get-ChildItem | Select-Object Name\"",
+    ] {
+        assert!(win(cmd).ok, "`{}` 应无条件放行", cmd);
     }
 }
 
 #[test]
-fn plain_cmd_commands_pass() {
+fn previously_forbidden_ps_tokens_are_now_allowed() {
+    // 旧 FORBIDDEN 表里的词元，现在一律放行（不再有违禁词过滤）
+    for cmd in [
+        "Get-ChildItem | Format-Table",
+        "Set-ExecutionPolicy Bypass",
+        "Invoke-Expression $cmd",
+        "echo $env:PATH",
+        "Get-Content app.log -Tail 20",
+        "gc -tail 20 app.log",
+    ] {
+        assert!(win(cmd).ok, "`{}` 应放行（sidecar 不再做内容审查）", cmd);
+    }
+}
+
+#[test]
+fn long_one_liner_is_accepted() {
+    // 事故二：222 字符的探测命令
+    let long = r#"powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'https://www.google.com/search?q=best+agent+model' -UseBasicParsing -TimeoutSec 15; 'g: ' + $r.StatusCode } catch { 'g FAIL: ' + $PSItem.Exception.Message }""#;
+    assert!(long.len() > 200 && long.len() < CMD_MAX_LEN, "用例应落在 200~{} 区间", CMD_MAX_LEN);
+    let r = win(long);
+    assert!(r.ok, "长一行式不应再被拒: {}", r.message);
+    assert!(!r.message.contains("one-liner"));
+}
+
+#[test]
+fn chained_commands_are_allowed() {
+    // 链式命令不再拦截：模型按需自由组合
+    for cmd in [
+        "echo a && echo b",
+        "echo a || echo b",
+        "dir; echo hi",
+        "cd src && npm test",
+    ] {
+        assert!(win(cmd).ok, "`{}` 应放行（链式拦截已移除）", cmd);
+    }
+}
+
+#[test]
+fn powershell_without_no_profile_is_allowed() {
+    // 不再强制 -NoProfile 前缀
+    assert!(win("powershell -Command \"Get-ChildItem\"").ok);
+    assert!(win("pwsh -File build.ps1").ok);
+}
+
+#[test]
+fn destructive_commands_pass_sidecar_but_are_left_to_human_review() {
+    // 高危命令在 sidecar 层放行 —— 拦截职责已上移到 gateway 的人工审查。
+    // 这里断言的是「sidecar 不拦」，审查由 gateway 保证（见 gateway.test.ts）。
+    for cmd in [
+        "rm -rf /tmp/x",
+        "format C: /q",
+        "reg add HKLM\\Software\\X",
+        "del /f /s /q D:\\data",
+    ] {
+        let r = win(cmd);
+        assert!(r.ok, "`{}` 应在 sidecar 放行，交由人工审查", cmd);
+        // 且不再由 sidecar 标注风险等级（网关负责）
+        assert!(!r.high_risk, "sidecar 不再做高危识别");
+    }
+}
+
+#[test]
+fn plain_commands_pass() {
     assert!(win("dir").ok);
     assert!(win("npm test").ok);
+    assert!(win("git status").ok);
+}
+
+// ---------------------------------------------------------------- shell 标注回显
+
+#[test]
+fn shell_hint_reflects_model_annotation() {
+    assert_eq!(win("(PowerShell) Get-ChildItem -Force").shell, "powershell");
+    assert_eq!(win("(CMD) dir /b").shell, "cmd");
+    assert_eq!(win("(Bash) ls -la").shell, "bash");
+}
+
+#[test]
+fn shell_hint_falls_back_to_executable_prefix() {
+    assert_eq!(win("powershell -NoProfile -File a.ps1").shell, "powershell");
+    assert_eq!(win("bash -c 'echo hi'").shell, "bash");
+    assert_eq!(win("dir").shell, "cmd");
 }
