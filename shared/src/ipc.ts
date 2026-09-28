@@ -16,6 +16,8 @@ export const IPC = {
   chatNew: 'chat:new', // 新建对话（新会话 + 清空工作记忆）
   chatSwitch: 'chat:switch', // 切换会话（加载历史消息，恢复模型上下文）
   chatMainSession: 'chat:main-session', // 查询启动时创建的主对话原点会话 id
+  chatList: 'chat:list', // 列出历史会话（左栏对话列表；来自 sidecar sessions 表，重启不丢）
+  chatRename: 'chat:rename', // 用首条用户消息回填会话标题（左栏可辨识）
   chatEvent: 'chat:event', // main → renderer：流式事件/卡片（sendToView）
   // 审批
   approvalRespond: 'approval:respond',
