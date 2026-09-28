@@ -371,7 +371,7 @@ export function parseToolArgs(raw: string): unknown {
       /* 尝试下一种形态 */
     }
     try {
-      return JSON.parse(a.replace(/, (\s*[}\]])/g, '$1'));
+      return JSON.parse(a.replace(/,(\s*[}\]])/g, '$1'));
     } catch {
       /* 尝试下一种形态 */
     }
