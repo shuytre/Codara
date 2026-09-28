@@ -11,6 +11,7 @@ import {
   chat,
   convs,
   crew,
+  removeConversation,
   setActiveConversation,
   setCards,
   setChat,
@@ -102,6 +103,16 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
             {(c) => (
               <div class={`conv-item ${isActive(c.sessionId) ? 'active' : ''}`} onClick={() => switchTo(c.sessionId)}>
                 <span class="conv-name">{c.title}</span>
+                <button
+                  class="conv-del"
+                  title="删除会话"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void deleteConversation(c.sessionId, c.title);
+                  }}
+                >
+                  <IconTrash />
+                </button>
               </div>
             )}
           </For>
@@ -112,6 +123,16 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
             {(c) => (
               <div class={`conv-item ${isActive(c.sessionId) ? 'active' : ''}`} onClick={() => switchTo(c.sessionId)}>
                 <span class="conv-name">{c.title}</span>
+                <button
+                  class="conv-del"
+                  title="删除会话"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void deleteConversation(c.sessionId, c.title);
+                  }}
+                >
+                  <IconTrash />
+                </button>
               </div>
             )}
           </For>
@@ -128,6 +149,30 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
       </div>
     </aside>
   );
+
+  // 删除会话：二次确认 → 主进程删 sidecar 行 → 本地列表移除。
+  // 删的是当前会话时，主进程已把 AgentLoop 回退到主对话，渲染层同步清空中栏并回主对话。
+  const deleteConversation = async (sessionId: string, title: string) => {
+    if (switching()) return;
+    // 原生 confirm：Electron 渲染层可用；用户在确认前不会发生任何删除
+    const ok = window.confirm(`删除会话「${title}」？该会话的全部消息将一并删除，不可恢复。`);
+    if (!ok) return;
+    setSwitching(true);
+    try {
+      const r = await b.chatDelete({ sessionId });
+      if (!r?.ok) throw new Error(r?.error || '删除失败');
+      const wasActive = convs.activeId === sessionId;
+      removeConversation(sessionId);
+      if (wasActive) {
+        clearStream();
+        setActiveConversation(null); // 回主对话
+      }
+    } catch (err) {
+      setUi({ toast: `删除会话失败：${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   // 切回主对话：主对话 session 由主进程记录（首次启动创建），用 chatSwitch 恢复
   function switchToMain() {
@@ -171,9 +216,31 @@ function IconPlus() {
   );
 }
 
-/** lucide: settings */
-function IconSettings() {
+/** lucide: trash-2（会话删除） */
+function IconTrash() {
   return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <path d="M3 6h18" />
+      <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </svg>
+  );
+}
+
+/** lucide: settings */
+function IconSettings() {  return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
       width="16"
