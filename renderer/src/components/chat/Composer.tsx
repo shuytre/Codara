@@ -61,14 +61,14 @@ export function Composer() {
       setPrecheckOpen(true);
       return;
     }
-    // 首条用户消息作为会话标题回填（左栏才可辨识）。
-    // 只在「本会话还没有任何用户消息」时做一次，避免每条消息都改名。
+    setText('');
+    // 首条用户消息决定会话标题：左栏列表才有可辨识的名字（否则全是「新对话 18:49」）。
+    // 标题写回 sidecar 的 sessions 表，重启后仍能在左栏看到有意义的名称。
     const firstLine = t.split('\n')[0]?.trim() ?? '';
     const isFirstUserTurn = chat.entries.filter((e) => e.role === 'user').length === 0;
     if (isFirstUserTurn && firstLine) {
       void b.chatRename({ title: firstLine.slice(0, 24) }).catch(() => undefined);
     }
-    setText('');
     appendEntry({ id: `u-${Date.now()}`, role: 'user', text: t, createdAt: Date.now() });
     setChat({ streaming: true, streamText: '' });
     setSending(true);
