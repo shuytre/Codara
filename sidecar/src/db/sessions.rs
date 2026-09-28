@@ -109,6 +109,31 @@ pub fn session_create(state: &mut AppState, params: Value) -> Envelope {
     }
 }
 
+/// 重命名会话标题（首条用户消息回填，左栏可辨识）。
+/// 新建时只能拿到「对话 <时间>」这类无信息量标题，等首条消息到达后再回填。
+pub fn session_rename(state: &mut AppState, params: Value) -> Envelope {
+    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return Envelope::err(error::INVALID_PARAMS, "sessionId is required"),
+    };
+    let title = match params.get("title").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return Envelope::err(error::INVALID_PARAMS, "title is required"),
+    };
+    let conn = match open_conn(state) {
+        Ok(c) => c,
+        Err(e) => return Envelope::err(error::DB_ERROR, e),
+    };
+    match conn.execute(
+        "UPDATE sessions SET title = ?1 WHERE id = ?2",
+        rusqlite::params![title, session_id],
+    ) {
+        Ok(n) if n > 0 => Envelope::ok(json!({ "renamed": true })),
+        Ok(_) => Envelope::err(error::DB_ERROR, "session not found"),
+        Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
+    }
+}
+
 pub fn msg_append(state: &mut AppState, params: Value) -> Envelope {
     let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
@@ -151,6 +176,48 @@ pub fn msg_append(state: &mut AppState, params: Value) -> Envelope {
         rusqlite::params![session_id, role, content, tool_calls, tool_call_id, up, uc, now_ms()],
     ) {
         Ok(_) => Envelope::ok(json!({ "appended": true })),
+        Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
+    }
+}
+
+/// 列出会话（左栏对话列表的数据源）。
+///
+/// 动机：渲染层的会话列表此前是**纯内存**的（`convs.list`），进程一重启就只剩
+/// 「主对话」一项，用户以为「对话记录丢了」。会话与消息其实一直好好躺在
+/// sidecar 的 sqlite 里，缺的只是**一条把它们读出来的 RPC** ——
+/// sidecar 有 sessions 表、有 session.create，却没有 session.list。
+///
+/// 语义：
+///  - 默认只列 `kind='main'` 的会话（专家团 kind='crew' 的实例会话不进左栏对话列表）；
+///  - 按 created_at 倒序（最新在前）；`createdAt` 为毫秒时间戳，渲染层据此分组「今天/更早」；
+///  - 不做角色隔离断言：会话**列表**不含任何消息内容，只是 (id, title, createdAt) 元信息；
+///    真正的隔离在 msg.list / msg.append 上（仍需 roleId），不会被这里绕过。
+pub fn session_list(state: &mut AppState, params: Value) -> Envelope {
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("main").to_string();
+    let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).max(1).min(500);
+
+    let conn = match open_conn(state) {
+        Ok(c) => c,
+        Err(e) => return Envelope::err(error::DB_ERROR, e),
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT id, title, created_at FROM sessions WHERE kind = ?1 ORDER BY created_at DESC LIMIT ?2",
+    ) {
+        Ok(s) => s,
+        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
+    };
+    let rows = stmt.query_map(rusqlite::params![kind, limit], |r| {
+        Ok(json!({
+            "sessionId": r.get::<_, String>(0)?,
+            "title": r.get::<_, Option<String>>(1)?,
+            "createdAt": r.get::<_, i64>(2)?,
+        }))
+    });
+    match rows {
+        Ok(iter) => {
+            let items: Vec<Value> = iter.filter_map(|x| x.ok()).collect();
+            Envelope::ok(json!({ "sessions": items }))
+        }
         Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
     }
 }
