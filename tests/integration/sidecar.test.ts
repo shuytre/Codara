@@ -618,4 +618,50 @@ describe('M3: 会话隔离', () => {
     expect((await h.call('session.rename', { sessionId: s.result.data.sessionId, title: '   ' })).result.ok).toBe(false);
     expect((await h.call('session.rename', { sessionId: 'sess-ghost', title: 'y' })).result.ok).toBe(false);
   });
+
+  it('session.delete 级联删除：会话与其消息一并消失，列表不再包含', async () => {
+    const s = await h.call('session.create', { kind: 'main', title: '待删除会话' });
+    const sid = s.result.data.sessionId;
+    await h.call('msg.append', { sessionId: sid, roleId: 'main', role: 'user', content: '第一条' });
+    await h.call('msg.append', { sessionId: sid, roleId: 'main', role: 'assistant', content: '第二条' });
+
+    // 删除前：消息确实存在，列表包含该会话
+    const beforeList = await h.call('msg.list', { sessionId: sid, roleId: 'main' });
+    expect(beforeList.result.ok).toBe(true);
+    const beforeMsgs = beforeList.result.data.messages as unknown[];
+    expect(beforeMsgs.length).toBe(2);
+    const beforeRows = (await h.call('session.list', { kind: 'main' })).result.data.sessions as Array<{
+      sessionId: string;
+    }>;
+    expect(beforeRows.some((r) => r.sessionId === sid)).toBe(true);
+
+    const del = await h.call('session.delete', { sessionId: sid });
+    expect(del.result.ok).toBe(true);
+    expect((del.result.data as { deleted: number }).deleted).toBe(1);
+
+    // 删除后：会话行已不存在（级联不留孤儿消息行），列表不再包含
+    const afterList = await h.call('msg.list', { sessionId: sid, roleId: 'main' });
+    expect(afterList.result.ok).toBe(false);
+    expect(afterList.result.error?.code).toBe(7002);
+    const afterRows = (await h.call('session.list', { kind: 'main' })).result.data.sessions as Array<{
+      sessionId: string;
+    }>;
+    expect(afterRows.some((r) => r.sessionId === sid)).toBe(false);
+  });
+
+  it('session.delete 幂等边界：重复删除与不存在会话都返回失败而非崩溃', async () => {
+    const s = await h.call('session.create', { kind: 'main', title: '删两次' });
+    const sid = s.result.data.sessionId;
+    expect((await h.call('session.delete', { sessionId: sid })).result.ok).toBe(true);
+    // 第二次：找不到行 → 明确失败（7002 session not found），进程仍然健康
+    const again = await h.call('session.delete', { sessionId: sid });
+    expect(again.result.ok).toBe(false);
+    expect(again.result.error?.code).toBe(7002);
+    // 不存在的会话同样失败但可控
+    expect((await h.call('session.delete', { sessionId: 'sess-ghost' })).result.ok).toBe(false);
+    // 缺参校验
+    expect((await h.call('session.delete', { sessionId: '' })).result.ok).toBe(false);
+    // 删除之后 sidecar 仍可正常服务
+    expect((await h.call('session.list', { kind: 'main' })).result.ok).toBe(true);
+  });
 });
