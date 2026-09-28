@@ -53,6 +53,8 @@ pub fn dispatch(state: &mut AppState, req: RpcRequest) -> Envelope {
         "db.exec" => crate::db::db_exec(state, params),
         // ---- sessions（M3 会话隔离） ----
         "session.create" => crate::db::sessions::session_create(state, params),
+        "session.list" => crate::db::sessions::session_list(state, params),
+        "session.rename" => crate::db::sessions::session_rename(state, params),
         "msg.append" => crate::db::sessions::msg_append(state, params),
         "msg.list" => crate::db::sessions::msg_list(state, params),
         // ---- audit ----
