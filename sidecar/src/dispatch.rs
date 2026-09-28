@@ -105,4 +105,3 @@ fn init(state: &mut AppState, params: Value) -> Envelope {
         }
     }))
 }
-
