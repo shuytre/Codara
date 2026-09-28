@@ -55,6 +55,7 @@ pub fn dispatch(state: &mut AppState, req: RpcRequest) -> Envelope {
         "session.create" => crate::db::sessions::session_create(state, params),
         "session.list" => crate::db::sessions::session_list(state, params),
         "session.rename" => crate::db::sessions::session_rename(state, params),
+        "session.delete" => crate::db::sessions::session_delete(state, params),
         "msg.append" => crate::db::sessions::msg_append(state, params),
         "msg.list" => crate::db::sessions::msg_list(state, params),
         // ---- audit ----
