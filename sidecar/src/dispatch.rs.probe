@@ -1,4 +1,0 @@
-//! RPC 方法分发：所有 method 的单一入口（对齐规格 3.2 方法表）。
-//! 统一信封：ok / data / error / truncated / cacheRef / message（见 rpc/envelope.rs）。
-mod dispatch_impl;
-pub use dispatch_impl::*;
