@@ -6,6 +6,7 @@ import {
   CrewRole,
   PlanCard,
   ToolCallCard,
+  ToolSpec,
 } from '@codara/contract';
 
 import { ROLE_DEFS, toolSpecsForRole } from '../crew/roles';
@@ -152,7 +153,10 @@ export class AgentLoop {
       try {
         result = await this.model.chatStream(
           {
-            messages: this.messages,
+            // 发送前清洗：把历史里非法的 tool_calls.arguments 重写为合法 JSON。
+            // 坏 JSON 一旦被 push 进 this.messages 就会污染此后每一轮请求，
+            // 接口直接 400（Assistant tool call arguments must be valid JSON）→ 整轮中断。
+            messages: sanitizeOutgoingMessages(this.messages),
             tools: toolSpecs,
           },
           (e) => {
@@ -215,11 +219,33 @@ export class AgentLoop {
         //  陷入无终点循环 —— 这是弱模型场景下工具调用反复失败的直接原因之一）
         let params: unknown;
         let argsError: string | null = null;
+        // 缺参/形状错误时携带的 ErrorCode（-32602），与 sidecar 侧保持同一口径，
+        // 便于测试与上层按码分支，而不是只有一句自然语言。
+        let argsErrorCode: number | undefined;
         try {
           params = parseToolArgs(tc.arguments || '');
         } catch (e) {
           params = undefined;
           argsError = (e as Error).message;
+        }
+
+        // 解析成功但缺必填字段：先用 schema 生成精确的可自纠提示。
+        // 原实现只把它当普通执行失败回注，模型看到的是 sidecar 侧「缺少必填参数」
+        // 却不带正确形状，于是原样重发同样的坏参数（截图里 write 连挂两次的直接原因）。
+        const spec = toolSpecs.find((t) => t.name === tc.name);
+        let coercedNote: string | null = null;
+        if (!argsError && spec) {
+          const c = coerceToolArgs(spec, params);
+          if (c.params !== undefined) {
+            // 兜底：write create=true 仅给 path —— 模型想建空文件，补一个空 edits
+            if (c.params !== params) {
+              params = c.params;
+              coercedNote = c.note ?? null;
+            }
+          } else if (c.error) {
+            argsError = c.error;
+            argsErrorCode = c.code;
+          }
         }
 
         const card: ToolCallCard = {
@@ -229,14 +255,14 @@ export class AgentLoop {
           createdAt: Date.now(),
           tool: tc.name,
           paramsSummary: argsError
-            ? `（arguments JSON 解析失败）${(tc.arguments || '').slice(0, 280)}`
-            : JSON.stringify(params).slice(0, 300),
+            ? `（arguments 不可用）${(tc.arguments || '').slice(0, 280)}`
+            : `${coercedNote ? `（已自愈：${coercedNote}）` : ''}${JSON.stringify(params).slice(0, 300)}`,
         };
         cb.onCard(card);
 
         if (argsError) {
           cb.onCard({ ...card, status: 'failed', result: argsError.slice(0, 800), ok: false });
-          const failMsg = toolErrorMsg(tc.id, argsError);
+          const failMsg = toolErrorMsg(tc.id, argsError, argsErrorCode);
           this.messages.push(failMsg);
           void this.persist(crew, failMsg);
           continue;
@@ -334,6 +360,25 @@ export class AgentLoop {
     return this.originalSessionId;
   }
 
+  /** 当前绑定的会话 id（chatNew/chatSwitch 会改变它；用于判断「删的是不是当前会话」） */
+  getActiveSessionId(): string | null {
+    return this.mainSessionId;
+  }
+
+  /**
+   * 删除会话后的回退：解绑当前会话，并把活跃会话指回主对话原点。
+   * 回退到原点后，后续消息会写回原点会话（而不是已删除的 sessionId）。
+   */
+  detachAndReturnToOrigin(deletedId: string): void {
+    if (this.mainSessionId === deletedId) this.mainSessionId = null;
+    if (this.originalSessionId === deletedId) {
+      // 被删的恰好是原点会话：主对话失去落点，置空让上层重建/降级
+      this.originalSessionId = null;
+    } else if (this.originalSessionId) {
+      this.mainSessionId = this.originalSessionId;
+    }
+  }
+
   private mainSessionId: string | null = null;
   private originalSessionId: string | null = null;
 }
@@ -352,9 +397,9 @@ function summarizeResult(r: unknown): string {
  *  1. markdown 代码围栏包裹（```json ... ```）
  *  2. JSON 前混入说明文字（剥到第一个 { 或 [）
  *  3. 尾逗号（[1,2,] / {"a":1,}）
- * 全部失败时抛错（附原文摘要），由调用方把明确错误回注模型 —— 修复参数的
- * 责任交给模型自纠，而不是静默当空参数执行。不做全角/单引号改写：
- * 字符串内容里全角字符是合法数据，激进替换会破坏正确参数。
+ *  4. **单引号包裹的 key/value**（弱模型最常见的非法 JSON 形态）
+ *  5. **截断未闭合**（流式被截断 / 模型少写 `}`、`]`）——按括号栈补齐后缀
+ * 全部失败时抛错（附原文摘要），由调用方回注模型自纠。
  */
 export function parseToolArgs(raw: string): unknown {
   const s = raw.trim();
@@ -364,22 +409,247 @@ export function parseToolArgs(raw: string): unknown {
   if (fenced?.[1] && fenced[1].trim()) attempts.push(fenced[1].trim());
   const brace = s.search(/[{[]/);
   if (brace > 0) attempts.push(s.slice(brace));
+  // 先做保守形态（尾逗号）与激进形态（单引号 / 截断补齐）分两轮，
+  // 保证「本来合法、只是带尾逗号」的输入不会被单引号改写污染。
   for (const a of attempts) {
-    try {
-      return JSON.parse(a);
-    } catch {
-      /* 尝试下一种形态 */
+    const variants = [a, a.replace(/,(\s*[}\]])/g, '$1')];
+    for (const v of variants) {
+      try {
+        return JSON.parse(v);
+      } catch {
+        /* 尝试下一种形态 */
+      }
     }
-    try {
-      return JSON.parse(a.replace(/,(\s*[}\]])/g, '$1'));
-    } catch {
-      /* 尝试下一种形态 */
+  }
+  // 第二轮：激进修复（仅在保守形态全失败后才尝试，降低误改合法数据风险）
+  for (const a of attempts) {
+    const relaxed = relaxJson(a);
+    if (relaxed) {
+      try {
+        return JSON.parse(relaxed);
+      } catch {
+        /* 继续 */
+      }
     }
   }
   throw new Error(
     `工具参数不是合法 JSON，无法解析（原文前 200 字：${raw.slice(0, 200)}）。` +
-      '请检查 arguments 的 JSON 语法（引号/逗号/括号闭合）后重新调用本工具。'
+      '请检查 arguments 的 JSON 语法（键与字符串必须用双引号、逗号分隔、括号闭合）后重新调用本工具。'
   );
+}
+
+/**
+ * 激进 JSON 放宽（仅在标准 parse 全失败时调用）：
+ *  - 把作为**键**出现的单引号串改为双引号（'key': → "key":）
+ *  - 补齐缺失的 `}` / `]`（按栈计数），并去掉尾部悬挂逗号
+ * 修复后仍必须是「对象或数组」才返回，否则返回 null 放弃。
+ */
+function relaxJson(src: string): string | null {
+  let out = src;
+  // 把**不在双引号字符串内**的单引号串改为双引号串（键与值都覆盖）。
+  // 逐字符扫描，避免误改双引号字符串里的合法单引号内容。
+  out = convertSingleQuotedStrings(out);
+  // 去掉尾部悬挂逗号
+  out = out.replace(/,(\s*[}\]])\s*$/g, '$1');
+  // 括号栈补齐
+  const stack: string[] = [];
+  let inStr: string | null = null;
+  let esc = false;
+  for (const ch of out) {
+    if (esc) {
+      esc = false;
+      continue;
+    }
+    if (ch === '\\') {
+      esc = true;
+      continue;
+    }
+    if (inStr) {
+      if (ch === inStr) inStr = null;
+      continue;
+    }
+    if (ch === '"') inStr = '"';
+    else if (ch === '{') stack.push('}');
+    else if (ch === '[') stack.push(']');
+    else if (ch === '}' || ch === ']') stack.pop();
+  }
+  if (inStr) out += '"';
+  while (stack.length > 0) out += stack.pop();
+  // 只接受对象/数组结果
+  const t = out.trim();
+  return t.startsWith('{') || t.startsWith('[') ? out : null;
+}
+
+/**
+ * 把不在双引号字符串内的单引号串改写为双引号串（弱模型最常见的非法 JSON 形态）。
+ * 逐字符状态机：进入 `'...'` 后把内部的双引号转义为 `\"`，整体换成双引号包裹。
+ */
+function convertSingleQuotedStrings(src: string): string {
+  let out = '';
+  let i = 0;
+  let inDouble = false;
+  let inSingle = false;
+  let esc = false;
+  while (i < src.length) {
+    const ch = src[i] as string;
+    if (esc) {
+      out += ch;
+      esc = false;
+      i++;
+      continue;
+    }
+    if (ch === '\\') {
+      out += ch;
+      esc = true;
+      i++;
+      continue;
+    }
+    if (inDouble) {
+      out += ch;
+      if (ch === '"') inDouble = false;
+      i++;
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "'") {
+        out += '"';
+        inSingle = false;
+      } else if (ch === '"') {
+        out += '\\"';
+      } else {
+        out += ch;
+      }
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      out += ch;
+    } else if (ch === "'") {
+      inSingle = true;
+      out += '"';
+    } else {
+      out += ch;
+    }
+    i++;
+  }
+  // 未闭合的单引号串：补一个收尾双引号
+  if (inSingle) out += '"';
+  return out;
+}
+
+/**
+ * 校验工具参数是否满足 schema 的 required 字段。
+ *  - 满足 → 原样返回 `{ params }`；
+ *  - 可用「安全兜底」修复 → 返回修复后的 `{ params, note }`；
+ *  - 无法安全修复 → 返回 `{ error }`，文案带「缺什么 + 正确形状」，让模型一次改对。
+ *
+ * 唯一兜底：`write` 且 `create===true`、只给了 `path`（无 edits）—— 模型意图明确是
+ * 「新建（空）文件」，补一个空 edits 即可。**绝不**在 create!==true 时补，避免覆盖已有文件。
+ */
+export function coerceToolArgs(
+  spec: ToolSpec,
+  params: unknown,
+): { params?: unknown; note?: string; error?: string; code?: number } {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) {
+    return { error: `工具「${spec.name}」的参数必须是 JSON 对象。${schemaHint(spec)}`, code: -32602 };
+  }
+  const obj = params as Record<string, unknown>;
+  const required = Array.isArray((spec.parameters as { required?: unknown }).required)
+    ? ((spec.parameters as { required: string[] }).required as string[])
+    : [];
+  const missing = required.filter((k) => obj[k] === undefined);
+
+  if (missing.length === 0) return { params };
+
+  // write 专项兜底：新建空文件
+  if (spec.name === 'write' && missing.length === 1 && missing[0] === 'edits' && obj['create'] === true) {
+    return {
+      params: { ...obj, edits: [{ newText: '' }] },
+      note: '你只给了 path+create 未给 edits，已按「新建空文件」处理。如需写入内容请带 edits 重写。',
+    };
+  }
+
+  return {
+    error: `工具「${spec.name}」缺少必填参数：[${missing.join(', ')}]。${schemaHint(spec)}`,
+    code: -32602,
+  };
+}
+
+/** 依据 schema 生成「必填项 + 字段说明 + 最小示例」的简短自纠提示 */
+function schemaHint(spec: ToolSpec): string {
+  const schema = spec.parameters as {
+    required?: string[];
+    properties?: Record<string, { type?: string; description?: string }>;
+  };
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const props = schema.properties ?? {};
+  const lines = required.map((k) => {
+    const p = props[k] ?? {};
+    return `  - ${k} (${p.type ?? 'any'})${p.description ? `：${p.description}` : ''}`;
+  });
+  const example: Record<string, unknown> = {};
+  for (const k of required) {
+    const t = props[k]?.type;
+    example[k] = t === 'array' ? [] : t === 'boolean' ? true : t === 'number' ? 0 : '';
+  }
+  return (
+    `必填：[\n${lines.join('\n')}\n]。` +
+    `正确形状示例：${spec.name}(${JSON.stringify(example)})。禁止原样重发，请补齐后重新调用。`
+  );
+}
+
+/**
+ * 发送前的历史清洗：把 assistant.tool_calls[].arguments 里非法的 JSON 重写为合法值。
+ *
+ * 为什么必须在发送前做：只要有一轮模型产出的 arguments 是坏 JSON，它就会被
+ * push 进 this.messages 并长期驻留；此后**每一轮**请求都会带上它，OpenAI 兼容接口
+ * 直接返回 400（"Assistant tool call arguments must be valid JSON"），整轮对话中断。
+ *
+ * 处理原则：
+ *  - 返回**浅拷贝**的消息数组，不改 this.messages 本体（保留原文供排查）；
+ *  - 坏参数替换为合法占位 `{"__invalid_arguments__":"<原文前 200 字>"}`，
+ *    而不是删掉整条 tool_call —— 否则会留下没有前置 tool_calls 的孤立 role='tool'
+ *    消息，触发另一种 400；
+ *  - assistant 带 tool_calls 时 content 必须为 null（OpenAI 兼容要求）。
+ */
+export function sanitizeOutgoingMessages(messages: ChatMessage[]): ChatMessage[] {
+  let fixed = 0;
+  const out = messages.map((m) => {
+    const tcs = (m as { tool_calls?: Array<{ function?: { arguments?: string } }> }).tool_calls;
+    if (m.role !== 'assistant' || !Array.isArray(tcs) || tcs.length === 0) return m;
+    const cleanCalls = tcs.map((tc) => {
+      const raw = tc.function?.arguments;
+      if (typeof raw === 'string' && !isParseableObject(raw)) {
+        fixed++;
+        return {
+          ...tc,
+          function: {
+            ...(tc.function ?? {}),
+            arguments: JSON.stringify({ __invalid_arguments__: raw.slice(0, 200) }),
+          },
+        };
+      }
+      return tc;
+    });
+    // content：带 tool_calls 时置 null（空串也会被严格接口拒绝）
+    const content = m.content === '' ? null : m.content;
+    return { ...m, content, tool_calls: cleanCalls } as ChatMessage;
+  });
+  if (fixed > 0) logger.warn('sanitized invalid tool_calls arguments', { count: fixed });
+  return out;
+}
+
+/** 判断字符串能否 parse 成 JSON 对象/数组（工具参数必须是这两种之一） */
+function isParseableObject(raw: string): boolean {
+  const s = raw.trim();
+  if (!s) return false;
+  try {
+    const v = JSON.parse(s) as unknown;
+    return v !== null && typeof v === 'object';
+  } catch {
+    return false;
+  }
 }
 
 /**
