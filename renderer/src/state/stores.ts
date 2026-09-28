@@ -31,6 +31,11 @@ export function setActiveConversation(sessionId: string | null): void {
   setConvs('activeId', sessionId);
 }
 
+export function removeConversation(sessionId: string): void {
+  setConvs('list', (prev) => prev.filter((c) => c.sessionId !== sessionId));
+  setConvs('activeId', (prev) => (prev === sessionId ? null : prev));
+}
+
 export const [cards, setCards] = createStore<{ list: Card[] }>({ list: [] });
 
 export const [usage, setUsage] = createStore<UsageSnapshot>({
