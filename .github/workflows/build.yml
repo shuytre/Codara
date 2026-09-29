@@ -60,6 +60,13 @@ jobs:
       - name: Unit tests（main + contract）
         run: pnpm test:main
 
+      # 渲染层测试：该 job 此前只跑 main，renderer 项目虽在 workspace 里声明但
+      # tests/renderer/ 一直不存在（--passWithNoTests 让 CI 一路绿灯），
+      # 于是「删除按钮点击无效」这类只在渲染期语义下暴露的缺陷（事件处理器引用
+      # return 之后的 const → TDZ）完全躲过 CI。补上这一跑。
+      - name: Renderer tests（Solid 编译期 + 历史映射回归）
+        run: pnpm test:renderer
+
       - name: Rust tests
         run: pnpm test:sidecar
 
