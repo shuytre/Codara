@@ -24,7 +24,7 @@ export interface CodaraBridge {
   chatSend(payload: ChatSendPayload): Promise<boolean>;
   chatAbort(): Promise<boolean>;
   chatNew(payload?: { title?: string }): Promise<{ ok: boolean; sessionId?: string; error?: string }>;
-  chatSwitch(payload: { sessionId: string }): Promise<{ ok: boolean; error?: string; messages?: Array<{ role: string; content: string }> }>;
+  chatSwitch(payload: { sessionId: string }): Promise<{ ok: boolean; error?: string; messages?: Array<{ role: string; content: string | null; toolName?: string }> }>;
   chatMainSession(): Promise<{ sessionId: string | null }>;
   /** 历史会话列表（左栏对话列表）：直接读 sidecar sessions 表，重启不丢 */
   chatList(): Promise<ConversationListResult>;
