@@ -158,12 +158,12 @@ function createWindow(settings: SettingsStore): void {
   });
 
   const ui = settings.get('ui');
-  if (ui.minimalMode) {
-    // 极简模式：无动画
-    mainWindow.once('ready-to-show', () => mainWindow?.show());
-  } else {
-    mainWindow.once('ready-to-show', () => mainWindow?.show());
-  }
+  // 注意：此处两个分支行为一致（都只做 show）。minimalMode 曾计划用于关闭窗口
+  // 动画，实际未接入任何差异化行为 —— 保留单一实现，避免制造「看起来有分支
+  // 其实没生效」的错觉。若后续要启用无动画，需在此显式落实（例如关闭窗口
+  // 过渡或跳过骨架屏），而不是留一个空 else。
+  mainWindow.once('ready-to-show', () => mainWindow?.show());
+  void ui;
   // 兜底：渲染层 8s 内未触发 ready-to-show（GPU/渲染异常）也强制显示窗口，
   // 让用户看到界面状态而非"点击无反应"
   const showTimer = setTimeout(() => {

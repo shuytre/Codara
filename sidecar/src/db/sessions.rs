@@ -181,6 +181,21 @@ pub fn msg_append(state: &mut AppState, params: Value) -> Envelope {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "role (user|assistant|tool|system) is required"),
     };
+    // 枚举校验：role 是 messages 表的语义字段，写入未知值会污染历史回放
+    // （例如自定义 role 会让 OpenAI 兼容接口 400，或让工具消息过滤规则失配）。
+    // 此前仅依赖调用方自律，现于 sidecar 入口硬校验。
+    if !matches!(role.as_str(), "user" | "assistant" | "tool" | "system") {
+        return Envelope::err(
+            error::INVALID_PARAMS,
+            format!("invalid role `{}`; expected user|assistant|tool|system", role),
+        );
+    }
+    // tool 角色必须携带 toolCallId：缺了就是孤立工具消息，回放时无法与 assistant
+    // 的 tool_calls 配对，会被上层过滤规则清理掉，等于静默丢一条历史。
+    let tool_call_id = params.get("toolCallId").and_then(|v| v.as_str()).map(String::from);
+    if role == "tool" && tool_call_id.is_none() {
+        return Envelope::err(error::INVALID_PARAMS, "role=tool requires toolCallId");
+    }
     // 字符串参数必须用 as_str() 取原文。此前用 Value::to_string() 是序列化语义：
     // 传入的字符串会被再包一层引号并转义（双重编码），导致 msg.list 恢复历史时
     // tool_calls 解析不出数组 → assistant 工具行被过滤 → 孤立 tool 消息 →
@@ -193,7 +208,6 @@ pub fn msg_append(state: &mut AppState, params: Value) -> Envelope {
         .get("toolCalls")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let tool_call_id = params.get("toolCallId").and_then(|v| v.as_str()).map(String::from);
     let up = params.get("usagePrompt").and_then(|v| v.as_i64()).unwrap_or(0);
     let uc = params.get("usageCompletion").and_then(|v| v.as_i64()).unwrap_or(0);
 

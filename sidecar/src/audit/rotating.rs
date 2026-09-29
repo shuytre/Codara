@@ -119,3 +119,31 @@ fn enforce_disk_limit(dir: &std::path::Path) {
         remaining -= size;
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 审计日志按天轮转的日期换算必须有测试锁定：
+    /// 曾经的 `-` 写法会让 1/2 月整体少 2 年（epoch day 0 → 1968-01-01），
+    /// 跨年轮转与按天检索会全部错位。
+    #[test]
+    fn day_string_epoch_zero_is_1970_01_01() {
+        assert_eq!(day_string(0), "19700101");
+    }
+
+    #[test]
+    fn day_string_handles_jan_feb_year_rollback() {
+        // 2024-01-01 00:00:00 UTC → 19723 天
+        assert_eq!(day_string(19723 * DAY_MS), "20240101");
+        // 2024-02-29（闰日）→ 19782 天
+        assert_eq!(day_string(19782 * DAY_MS), "20240229");
+        // 2023-12-31 → 19722 天（跨年边界：1 月必须归到下一年，不能被减成 2021）
+        assert_eq!(day_string(19722 * DAY_MS), "20231231");
+    }
+
+    #[test]
+    fn day_string_is_stable_within_a_day() {
+        let base = 19723 * DAY_MS;
+        assert_eq!(day_string(base), day_string(base + DAY_MS - 1));
+    }
+}

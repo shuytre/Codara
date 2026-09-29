@@ -73,10 +73,12 @@ pub fn fs_patch(state: &mut AppState, params: Value) -> Envelope {
         LineEnding::Lf
     };
 
-    // 基线哈希校验（防过期补丁）
+    // 基线哈希校验（防过期补丁）。
+    // 注意：**必须对所有已存在文件的写入生效，包括 create=true 的整体覆盖分支**。
+    // 若只在编辑分支校验，一旦上层把 create 传成了 true（例如异构 edits 被归一化成
+    // 整文件 newText），覆盖写就会完全跳过并发检查，静默拍平其他实例的改动。
+    // 调用方（网关）对 1002 有自愈重试：重读拿最新 hash 后重放。
     if exists {
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(&original_bytes);
         let current = hex::encode(sha2::Sha256::digest(&original_bytes));
         if let Some(bh) = &baseline_hash {
             if bh != &current {
@@ -87,7 +89,6 @@ pub fn fs_patch(state: &mut AppState, params: Value) -> Envelope {
                 );
             }
         }
-        let _ = hasher;
     }
 
     // create=true 语义：创建或整体覆盖。文件已存在且所有 edit 均为纯 newText

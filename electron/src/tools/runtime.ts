@@ -74,7 +74,7 @@ export class ToolRuntime {
           properties: {
             path: {
               type: 'string',
-              description: '必填。目标文件路径，相对工作区根（如 index.html）或绝对路径。缺失将直接报错。',
+              description: '必填。目标文件路径，相对工作区根（如 index.html）或绝对路径。缺失将直接报错。只能写工作区内文件，越界写入会被拒绝（错误码 1001）。',
             },
             edits: {
               type: 'array',
@@ -870,26 +870,46 @@ export function normalizeWriteParams(raw: unknown): WriteParams | null {
         edits.push({ oldText: oldLines.join('\n'), newText: lines.join('\n') });
         continue;
       }
-      // 无原文 → 只能整文件拼接（仅 create 场景安全）
+      // 无 oldLines：无法定位锚点。**不得在此臆造 create 语义** ——
+      // 旧实现给该项打 __append 标记并强制 create=true，导致对「已存在文件」使用
+      // 行区间参数时，patch.rs 判定 overwrite_existing 走整文件覆盖分支：
+      // 文件被替换为仅含目标行的内容（其余内容静默丢失），且 create 路径不做
+      // baselineHash 校验，并发写保护被一并绕过（严重数据丢失，已 PoC 复现）。
+      // 改为打普通 __append 标记，由下方按 create 真值分流处理。
       edits.push({ __append: '1', newText: lines.join('\n') });
     }
   }
 
   if (edits.length === 0) return null;
 
-  // 存在 __append（行区间无原文）时：退化为整文件覆盖（仅新建/全量重写安全）
+  // create 真值三态：
+  //   true  → 调用方显式声明「新建或整体覆盖」，__append 可安全拼接为整文件内容；
+  //   false → 调用方显式声明「编辑已有文件」，行区间无原文无法定位 → 拒绝，
+  //           回注可自纠的错误（禁止静默覆盖，避免数据丢失）；
+  //   undefined → 未声明：若存在 __append（全文件内容语义）视为新建意图（create=true），
+  //           否则不注入 create（让 sidecar 按编辑模式处理，其缺 hash 检查语义不变）。
+  const requestedCreate = typeof p.create === 'boolean' ? p.create : undefined;
   const hasAppend = edits.some((e) => e['__append'] === '1');
-  const finalEdits = hasAppend
-    ? [{ newText: edits.map((e) => e.newText ?? '').join('\n') }]
-    : edits;
 
-  const create = typeof p.create === 'boolean' ? p.create : undefined;
+  let finalEdits: Array<Record<string, string>> = edits;
+  let create: boolean | undefined = requestedCreate;
+
+  if (hasAppend) {
+    if (requestedCreate === false) {
+      // 显式编辑语义 + 行区间无原文 → 无法确定替换范围，拒绝（不猜、不覆盖）
+      return null;
+    }
+    // 新建 / 未声明 / 声明覆盖：拼接为完整文件内容
+    finalEdits = [{ newText: edits.map((e) => e.newText ?? '').join('\n') }];
+    create = true;
+  }
+
   const baselineHash = firstString(p, ['baselineHash', 'baseline_hash']);
 
   return {
     path,
     edits: finalEdits as unknown as WriteParams['edits'],
-    create: hasAppend ? true : create,
+    create,
     baselineHash,
   } as WriteParams;
 }

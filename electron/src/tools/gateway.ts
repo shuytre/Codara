@@ -24,7 +24,9 @@ export interface GatewayDecision {
   approvalToken?: string;
 }
 
-/** 高危命令特征：只用于给审查卡标注 risk=high，不改变「必须人工审查」这一结论。 */
+/** 高危命令特征：只用于给审查卡标注 risk=high，不改变「必须人工审查」这一结论。
+ *  因此这里**不追求完备**：漏判只会让卡片少一个红色标注，不会让命令免审。
+ *  补齐路径分隔与引号混淆形态，减少「明明是危险命令却没高亮」的误导。 */
 const HIGH_RISK_TERMINAL: RegExp[] = [
   /\brd\b/i, /\brmdir\b/i, /\bdel\b/i, /\berase\b/i, /\bformat\b/i, /\bdiskpart\b/i,
   /\bshutdown\b/i, /\breg\s+(add|delete)\b/i, /\bregedit\b/i, /\bnet\s+user\b/i,
@@ -32,6 +34,9 @@ const HIGH_RISK_TERMINAL: RegExp[] = [
   /\bvssadmin\b/i, /\bschtasks\s+\/create\b/i, /\bsc\s+delete\b/i, /\btaskkill\s+\/f\b/i,
   /\brm\s+-rf\b/i, /\bmkfs\b/i, /\bdd\s+if=/i, /\bchmod\s+777\b/i,
   /\bRemove-Item\b/i, /\bClear-Disk\b/i, /\bStop-Computer\b/i, /\bSet-ExecutionPolicy\b/i,
+  // 带路径前缀的可执行名（C:\Windows\System32\rd.exe / ./rm）与 PowerShell 别名
+  /[\\/](rd|rmdir|del|erase|format|diskpart|reg|icacls|takeown|bcdedit|rm)\.exe\b/i,
+  /\b(rimraf|shred|wipe|sdelete)\b/i,
 ];
 
 export class ApprovalGateway {
@@ -87,9 +92,15 @@ export class ApprovalGateway {
     };
     // 发审批事件给渲染层（经 sidecar 审计）
     void this.sidecar.call('audit.note', { event: 'approval.request', tool, risk: card.risk }).catch(() => undefined);
+    // 语义定稿（2026-09-29）：**首响即决**。此前用 `approved = (await l(card)) || approved`
+    // 逐个 await 全部监听器，任一返回 true 即放行 —— 在多监听器场景下等同于「一票通过」，
+    // 且会在上一个卡片仍等待时又弹下一张（重复打扰、状态互相覆盖）。
+    // 现在只取第一个监听器的裁决并立即返回：一次操作 = 一张卡 = 一次裁决。
+    // 其余监听器若已收到卡片，由上层 resolveApprovalCard 统一置为 resolved 收尾。
+    const listener = this.listeners[0];
     let approved = false;
-    for (const l of this.listeners) {
-      approved = (await l(card)) || approved;
+    if (listener) {
+      approved = await listener(card);
     }
     void this.sidecar
       .call('audit.note', { event: 'approval.result', tool, approved, approvalToken: token })
@@ -111,6 +122,10 @@ export class ApprovalGateway {
         return 'auto'; // M5：代码索引只读查询（sidecar 侧无写通道）
       case 'write':
         return 'ask'; // 写文件：读写类 → 强制人工审查（规格 6.1）
+        // 越界口径（2026-09-29 定稿）：write **只写工作区内**，越界由 sidecar 按
+        // PATH_ESCAPED(1001) 硬拒，不签发越界放行令牌（不留「批准即可越界」的口子）。
+        // 因此审批卡若出现越界路径，批准也不会让它落盘 —— 必须同时禁止模型绕道
+        // terminal 达成越界写入（base prompt 侧约束）。
       case 'git': {
         const op = (params as { op?: string })?.op;
         const readonly = ['status', 'diff', 'log', 'show', 'branch', 'worktree-list'];
