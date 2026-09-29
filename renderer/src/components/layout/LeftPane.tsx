@@ -57,20 +57,75 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
       if (!r?.ok) throw new Error(r?.error || '切换失败');
       clearStream();
       // 把主进程回传的历史重建到中栏：否则切换会话后中栏一片空白，用户以为历史丢失
-      const history = (r as { messages?: Array<{ role: string; content: string }> }).messages ?? [];
-      for (const [i, m] of history.entries()) {
-        appendEntry({
-          id: `h-${sessionId}-${i}`,
-          role: (m.role === 'user' ? 'user' : m.role === 'system' ? 'system' : 'assistant') as never,
-          text: m.content,
-          createdAt: Date.now(),
-        });
-      }
+      renderHistory(sessionId, (r.messages ?? []) as never[]);
       setActiveConversation(sessionId);
     } catch (err) {
       setUi({ toast: `切换会话失败：${err instanceof Error ? err.message : String(err)}` });
     } finally {
       setSwitching(false);
+    }
+  };
+
+  // 删除会话：二次确认 → 主进程删 sidecar 行 → 本地列表移除。
+  // 删的是当前会话时，主进程已把 AgentLoop 回退到主对话，渲染层同步清空中栏并回主对话。
+  // ⚠️ 必须定义在 return 之前：Solid 会把 return 编译成立即执行箭头，事件处理器在渲染期
+  //    就被挂载；若此处用 const 且声明在 return 之后，点击时求值会命中 TDZ
+  //    （ReferenceError: Cannot access 'deleteConversation' before initialization），
+  //    表现为「点删除按钮毫无反应」。
+  const deleteConversation = async (sessionId: string, title: string) => {
+    if (switching()) return;
+    // 原生 confirm：Electron 渲染层可用；用户在确认前不会发生任何删除
+    const ok = window.confirm(`删除会话「${title}」？该会话的全部消息将一并删除，不可恢复。`);
+    if (!ok) return;
+    setSwitching(true);
+    try {
+      const r = await b.chatDelete({ sessionId });
+      if (!r?.ok) throw new Error(r?.error || '删除失败');
+      const wasActive = convs.activeId === sessionId;
+      removeConversation(sessionId);
+      if (wasActive) {
+        clearStream();
+        setActiveConversation(null); // 回主对话
+        // 回主对话必须重建中栏历史，否则只剩空白欢迎页（见 switchToMainAsync）
+        await loadHistoryToCenter();
+      }
+    } catch (err) {
+      setUi({ toast: `删除会话失败：${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  // 把主进程回传的历史消息重建到中栏。
+  // 抽成公共函数：switchTo 与 switchToMainAsync 必须共享同一套重建逻辑，
+  // 否则「切回主对话」这条路径会漏掉重建（清空后一片空白，用户以为历史丢失）。
+  // 工具调用行（content=null 的 assistant）与 role='tool' 行在此一并还原为可读条目，
+  // 不再被 content 非空过滤误杀。
+  const renderHistory = (sessionId: string, history: Array<{ role: string; content: string | null; toolName?: string }>) => {
+    for (const [i, m] of history.entries()) {
+      const role = m.role === 'user' ? 'user' : m.role === 'system' ? 'system' : m.role === 'tool' ? 'system' : 'assistant';
+      // 工具结果行没有自然语言正文，用「工具返回」前缀 + 原文呈现，避免中栏出现无名 JSON
+      const text = m.content ?? (m.toolName ? `调用工具 ${m.toolName}…` : '（工具调用）');
+      appendEntry({
+        id: `h-${sessionId}-${i}`,
+        role: role as never,
+        text: role === 'system' && m.role === 'tool' ? `工具返回：${text}` : text,
+        createdAt: Date.now(),
+      });
+    }
+  };
+
+  // 切回主对话时重新拉取主对话历史并重建中栏
+  const loadHistoryToCenter = async () => {
+    try {
+      const main = await b.chatMainSession();
+      if (!main?.sessionId) return;
+      const r = await b.chatSwitch({ sessionId: main.sessionId });
+      if (!r?.ok) return;
+      clearStream();
+      renderHistory(main.sessionId, (r.messages ?? []) as never[]);
+    } catch {
+      // 拉取失败保持空白即可，用户仍可继续发消息
     }
   };
 
@@ -150,31 +205,8 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
     </aside>
   );
 
-  // 删除会话：二次确认 → 主进程删 sidecar 行 → 本地列表移除。
-  // 删的是当前会话时，主进程已把 AgentLoop 回退到主对话，渲染层同步清空中栏并回主对话。
-  const deleteConversation = async (sessionId: string, title: string) => {
-    if (switching()) return;
-    // 原生 confirm：Electron 渲染层可用；用户在确认前不会发生任何删除
-    const ok = window.confirm(`删除会话「${title}」？该会话的全部消息将一并删除，不可恢复。`);
-    if (!ok) return;
-    setSwitching(true);
-    try {
-      const r = await b.chatDelete({ sessionId });
-      if (!r?.ok) throw new Error(r?.error || '删除失败');
-      const wasActive = convs.activeId === sessionId;
-      removeConversation(sessionId);
-      if (wasActive) {
-        clearStream();
-        setActiveConversation(null); // 回主对话
-      }
-    } catch (err) {
-      setUi({ toast: `删除会话失败：${err instanceof Error ? err.message : String(err)}` });
-    } finally {
-      setSwitching(false);
-    }
-  };
-
-  // 切回主对话：主对话 session 由主进程记录（首次启动创建），用 chatSwitch 恢复
+  // 切回主对话：主对话 session 由主进程记录（首次启动创建），用 chatSwitch 恢复。
+  // 必须重建历史（此前只 clearStream 导致中栏空白）。
   function switchToMain() {
     void switchToMainAsync();
   }
@@ -187,6 +219,7 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
       const r = await b.chatSwitch({ sessionId: main.sessionId });
       if (!r?.ok) throw new Error(r?.error || '切换失败');
       clearStream();
+      renderHistory(main.sessionId, (r.messages ?? []) as never[]);
       setActiveConversation(null); // null = 主对话
     } catch (err) {
       setUi({ toast: `切回主对话失败：${err instanceof Error ? err.message : String(err)}` });
