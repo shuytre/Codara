@@ -287,7 +287,11 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     async (
       _e,
       payload: unknown,
-    ): Promise<{ ok: boolean; error?: string; messages?: Array<{ role: string; content: string }> }> => {
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      messages?: Array<{ role: string; content: string | null; toolName?: string }>;
+    }> => {
     try {
       const p = z.object({ sessionId: z.string().min(1) }).parse(payload);
       deps.loop.abort();
@@ -337,12 +341,28 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
             });
           });
         deps.loop.loadMessages(history as never[]);
-        // 回传渲染层用于重建对话流：否则左栏切换会话后中栏一片空白，用户以为历史丢了
+        // 回传渲染层用于重建对话流：否则左栏切换会话后中栏一片空白，用户以为历史丢了。
+        // ⚠️ 不能用「content 非空」过滤：带 tool_calls 的 assistant 行 content 恰好是 null
+        //    （上面 L319 刚归一过），一旦按 content 过滤就会把工具调用记录整条丢掉，
+        //    只留下孤立的 role='tool' 行 —— 中栏变成一段无归属的原始 JSON，用户视角就是
+        //    「切换后对话内容消失了」。改为保留工具行，并带上工具名供渲染层可读呈现。
         return {
           ok: true,
           messages: history
-            .filter((m) => typeof m.content === 'string' && m.content.length > 0)
-            .map((m) => ({ role: String(m.role), content: String(m.content) })),
+            .filter((m) => Boolean(m.content) || Array.isArray(m.tool_calls) || m.role === 'tool')
+            .map((m) => {
+              // assistant 带 tool_calls 且无正文时，用工具名合成一句可读摘要，避免中栏空白
+              let content = typeof m.content === 'string' ? m.content : null;
+              let toolName: string | undefined;
+              if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+                const names = (m.tool_calls as Array<{ function?: { name?: string } }>)
+                  .map((t) => t.function?.name)
+                  .filter((n): n is string => Boolean(n));
+                toolName = names.join(' / ');
+                if (!content && toolName) content = `调用工具：${toolName}`;
+              }
+              return { role: String(m.role), content, toolName };
+            }),
         };
       }
       return { ok: true };
