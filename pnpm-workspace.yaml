@@ -4,3 +4,4 @@ packages:
   - renderer
   - tests/integration
   - tests/mock-llm
+  - tests/renderer
