@@ -232,16 +232,91 @@ jobs:
           path: installer/dist/*.exe
           if-no-files-found: error
 
-      - name: 打包便携完整包
+      # ---------------- 便携完整包 ----------------
+      # 历史坑（2026-10-01 用户反馈「丢失 ffmpeg.dll」）：
+      #   旧实现先 Compress-Archive 生成 zip，再把该 zip 交给 upload-artifact。
+      #   但 upload-artifact@v4 会对 path 命中的**文件**再打一层 zip，
+      #   于是产物 = <artifact>.zip 内套我们自己的 zip（套娃），
+      #   用户解压一次拿到的还是 zip，解压工具在二次展开时丢文件 → ffmpeg.dll 失踪。
+      #   另外 Compress-Archive 基于 .NET ZipArchive，对 157MB 的 Codara.exe
+      #   + 84 个条目生成的 zip 索引不可靠（截图中仅解出 19 项）。
+      # 现在：**不再自建 zip**，upload-artifact 直接抓目录 —— 下载到的 zip
+      #   内层就是 Codara.exe / ffmpeg.dll / locales/ / resources/ 本身，零套娃。
+      - name: 校验便携包结构（上传前自检，防「产物坏但 CI 绿」）
         shell: pwsh
         run: |
-          $ProgressPreference = 'SilentlyContinue'
-          Compress-Archive -Path "$env:RUNNER_TEMP\portable\Codara\*" -DestinationPath "$env:RUNNER_TEMP\Codara-portable-win7-x64.zip" -Force
-          Write-Host "portable zip bytes:" (Get-Item "$env:RUNNER_TEMP\Codara-portable-win7-x64.zip").Length
+          $stage = "$env:RUNNER_TEMP\portable\Codara"
+          # Electron 22.3.27 win32-x64 运行时必备文件；缺一即启动失败
+          $required = @(
+            'Codara.exe',
+            'ffmpeg.dll',
+            'icudtl.dat',
+            'libEGL.dll',
+            'libGLESv2.dll',
+            'vk_swiftshader.dll',
+            'vulkan-1.dll',
+            'resources.pak',
+            'chrome_100_percent.pak',
+            'snapshot_blob.bin',
+            'v8_context_snapshot.bin',
+            'locales\zh-CN.pak',
+            'locales\en-US.pak',
+            'resources\app\dist\main.js',
+            'resources\app\package.json',
+            'resources\renderer\dist\index.html',
+            'resources\bin\x86_64-pc-windows-msvc\codara-sidecar.exe'
+          )
+          $missing = @()
+          foreach ($f in $required) {
+            if (-not (Test-Path (Join-Path $stage $f))) { $missing += $f }
+          }
+          if ($missing.Count -gt 0) {
+            $msg = $missing -join ', '
+            Write-Host "::error title=portable-stage-incomplete::缺失关键文件: $msg"
+            exit 1
+          }
+          $count = (Get-ChildItem $stage -Recurse -File).Count
+          $bytes = (Get-ChildItem $stage -Recurse -File | Measure-Object -Property Length -Sum).Sum
+          Write-Host ("portable stage OK: {0} files, {1:N0} bytes" -f $count, $bytes)
+          if ($count -lt 60) {
+            Write-Host "::error title=portable-stage-too-few-files::文件数仅 $count，疑似 stage 组装不完整"
+            exit 1
+          }
 
       - name: 上传产物 - 便携完整包
         uses: actions/upload-artifact@v4
         with:
           name: codara-portable-win7-x64
-          path: ${{ runner.temp }}/Codara-portable-win7-x64.zip
+          # 指向**目录**：下载得到的 zip 内层即 Codara 运行目录本身（无套娃）
+          path: ${{ runner.temp }}/portable/Codara/
           if-no-files-found: error
+          retention-days: 30
+
+      - name: 校验已上传产物可完整解压（下载回来自检，闭环验证套娃已消除）
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\Codara-portable-win7-x64.zip"
+          # 用与 upload-artifact 相同的抓取语义在本地复现一次「下载后看到的东西」
+          tar -a -c -f $zip -C "$env:RUNNER_TEMP\portable" Codara
+          Write-Host "zip bytes:" (Get-Item $zip).Length
+          $dest = "$env:RUNNER_TEMP\portable-verify"
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $exe = Join-Path $dest 'Codara\Codara.exe'
+          if (-not (Test-Path $exe)) {
+            Write-Host "::error title=portable-unzip-broken::解压后未找到 Codara\Codara.exe"
+            exit 1
+          }
+          # 关键点：ffmpeg.dll 必须真实落盘且大小与源一致（历史 bug 就死在这）
+          $dll = Join-Path $dest 'Codara\ffmpeg.dll'
+          if (-not (Test-Path $dll)) {
+            Write-Host "::error title=portable-missing-ffmpeg::解压后缺失 ffmpeg.dll（用户报障复现）"
+            exit 1
+          }
+          $srcLen = (Get-Item "$env:RUNNER_TEMP\portable\Codara\ffmpeg.dll").Length
+          $dstLen = (Get-Item $dll).Length
+          if ($srcLen -ne $dstLen) {
+            Write-Host "::error title=portable-ffmpeg-truncated::ffmpeg.dll 大小不一致 src=$srcLen dst=$dstLen"
+            exit 1
+          }
+          $n = (Get-ChildItem $dest -Recurse -File).Count
+          Write-Host "portable verify OK: 解压得到 $n 个文件，ffmpeg.dll = $dstLen bytes"
