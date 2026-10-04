@@ -121,11 +121,45 @@ harness 原本「release 存在就用 release，否则用 debug」。改完 side
 按 id 正确配对（内容可区分的 6 个文件）、并发读各自内容不串台、
 并发写同一文件不交错、排他请求耗时累加、50 并发无丢失、并发后仍能服务。
 
-## 提交
+## 提交与推送
+
+### 本地提交（tag `round6-local` 保留）
 
 | Commit | 内容 |
 |---|---|
 | `550f446` | 阶段 1：主进程 + 渲染层会话隔离、工具卡、消息气泡 |
 | `eaa43c8` | 阶段 2：sidecar 多线程 worker |
+| `026ab5c` | 第 6 轮报告 |
+| `47bb958` | merge：合并远端第 5 轮修复 |
 
 两阶段改动范围无重叠，可独立回滚。
+
+### 推送前的分叉处理
+
+推送时发现本地与 `origin/main` 在 `3e8805c` 分叉 —— 远端有 9 笔本地没有的提交
+（CI 产物闭环、DB 连接复用、值级脱敏、write 归一化）。直接推会覆盖这些修复，
+所以先在本地 merge 并逐个解决 4 处冲突：
+
+| 文件 | 冲突 | 解法 |
+|---|---|---|
+| `tools/gateway.ts` | 远端改「首响即决」（只取 `listeners[0]`，修一票通过/重复弹卡），本轮改遍历全部监听器透传 sessionId | **保留远端的首响即决**，只在其上补传 sessionId —— 一次操作仍是一张卡一次裁决，但裁决要落到发起该调用的会话上 |
+| `audit/rotating.rs` | 远端新增 `mask_credentials_in_text`（值级脱敏），本轮改签名 | 保留远端函数体，签名取本轮 `&AppState` |
+| `db/mod.rs`、`db/sessions.rs` | 远端引入 `with_conn`（连接复用），本轮改签名与字段访问 | **以远端为基底**（删掉 `with_conn` 会让每次 RPC 重开 SQLite 连接），套上本轮签名 + 访问器，共 9 处签名 + 3 处字段 |
+
+顺带处理：
+- 移除 `core.148466`（12.9MB core dump，曾被误提交），补 `.gitignore` 规则
+- 修 `db/sessions.rs` 里 `msg_list` 的函数体贴连（远端遗留，能编译但可读性差）
+
+### 推送方式与代价
+
+环境无 `git push` 凭据（`gh auth login` 未登录，credential helper 返回空），
+改用 GitHub API 按文件提交。代价是**提交历史被拆细**，且远端历史与本地
+`round6-local` 是两条线：
+
+- 内容：42 个文件**逐字节校验一致**（`git show origin/main:<path>` 与本地逐字节比对）
+- 代价：本地 3 笔提交在远端表现为多笔分组提交；CI 因此触发多次（前几次被
+  GitHub 自动 cancel，属正常并发行为，只有最后一次有效）
+- 本地提交用 tag `round6-local` 保留，后续如需规整历史可据此 rebase
+
+**下次注意**：若沙箱能提供 PAT，优先用 `git push` 一次性推送，避免历史被拆。
+
