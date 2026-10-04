@@ -85,7 +85,8 @@ input:focus, textarea:focus { border-color: var(--cobalt); }
 .card { border-radius: 12px; }
 .card-head { border-radius: 12px 12px 0 0; }
 .entry-assistant { border-radius: 14px 14px 14px 4px; }
-.entry-user { border-radius: 14px 14px 4px 14px; }
+/* 气泡尾巴随对齐方向换边：靠左后小圆角在左下（原样式 14px 14px 4px 14px 是右对齐专属） */
+.entry-user { border-radius: 14px 4px 14px 14px; }
 pre.card-body { border-radius: 0 0 6px 6px; }
 .card-body { border-radius: 0 0 12px 12px; }
 details > summary { cursor: pointer; padding: 6px 12px; font-size: 12px; color: var(--ink-secondary); border-top: 1px solid var(--hairline); }

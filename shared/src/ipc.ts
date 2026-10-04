@@ -3,6 +3,8 @@
  * 所有通道 payload 在主进程 ipc/validate.ts 做 schema 校验。
  */
 
+import type { Card } from './cards';
+
 export const IPC = {
   // 设置与凭据
   settingsGet: 'settings:get',
@@ -16,6 +18,7 @@ export const IPC = {
   chatNew: 'chat:new', // 新建对话（新会话 + 清空工作记忆）
   chatSwitch: 'chat:switch', // 切换会话（加载历史消息，恢复模型上下文）
   chatMainSession: 'chat:main-session', // 查询启动时创建的主对话原点会话 id
+  chatRunning: 'chat:running', // 查询哪些会话正在跑任务（左栏「运行中」标点）
   chatList: 'chat:list', // 列出历史会话（左栏对话列表；来自 sidecar sessions 表，重启不丢）
   chatRename: 'chat:rename', // 用首条用户消息回填会话标题（左栏可辨识）
   chatDelete: 'chat:delete', // 删除会话（级联删消息；左栏悬停删除入口）
@@ -66,6 +69,11 @@ export type IpcChannel = (typeof IPC)[keyof typeof IPC];
 export interface ChatSendPayload {
   text: string;
   mode: 'ask' | 'plan' | 'goal';
+  /**
+   * 目标会话 id（第 6 轮并行隔离）。
+   * 必传语义：主进程按它取对应的 AgentLoop/BudgetLedger；缺省才回落到原点会话。
+   */
+  sessionId?: string;
 }
 
 /** settings:get 响应体 */
@@ -130,12 +138,53 @@ export interface BudgetRespondPayload {
   action: 'extend' | 'reduce' | 'terminate';
   newTokenLimit?: number;
   newCostLimitCNY?: number;
+  /** 预算所属会话；缺省时 extend 作用于全部会话、terminate 不执行 */
+  sessionId?: string;
 }
 
 /** approval:respond 请求体 */
 export interface ApprovalRespondPayload {
   approvalToken: string;
   approved: boolean;
+  /** 审批卡所属会话（第 6 轮：等待表按会话分桶，缺省无法定位） */
+  sessionId?: string;
+}
+
+/** main → renderer：流式事件/卡片（全部携带 sessionId 供渲染层分区路由） */
+export type ChatEventPayload =
+  | { kind: 'delta'; text: string; sessionId?: string }
+  | { kind: 'card'; card: Card; sessionId?: string }
+  | { kind: 'done'; text: string; usage?: unknown; sessionId?: string };
+
+/**
+ * 历史工具调用（chat:switch 回传）。
+ * 第 6 轮新增：此前历史只回一句「调用工具：xxx」文本，切回会话后右栏
+ * 「工具流水」永远是空的 —— 它只认 type='tool-call' 卡，而历史路径从不生成卡。
+ */
+export interface ChatHistoryToolCall {
+  name: string;
+  /** 参数 JSON 文本（截断到 2000） */
+  args: string;
+  /** 工具结果 JSON 文本（截断到 800）；无配对结果时为空串 */
+  result: string;
+  ok: boolean;
+}
+
+/** chat:switch 响应体中的单条历史消息 */
+export interface ChatHistoryMessage {
+  role: string;
+  content: string | null;
+  /** assistant 行的工具名摘要（多工具用 / 连接） */
+  toolName?: string;
+  /** assistant 行解析出的结构化工具调用（已配好参数与结果） */
+  toolCalls?: ChatHistoryToolCall[];
+}
+
+/** chat:switch 响应体 */
+export interface ChatSwitchResult {
+  ok: boolean;
+  error?: string;
+  messages?: ChatHistoryMessage[];
 }
 
 /** crew:start-task 请求体（M3） */

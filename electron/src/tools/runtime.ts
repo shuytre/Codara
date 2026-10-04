@@ -45,7 +45,12 @@ export class ToolRuntime {
     private readonly budget: BudgetLedger,
     private readonly gateway: ApprovalGateway,
     private readonly settings: SettingsStore,
-    private readonly scheduler?: CrewSchedulerLike
+    private readonly scheduler?: CrewSchedulerLike,
+    /**
+     * 归属会话 id（第 6 轮并行隔离）：随审批请求一起送到渲染层，
+     * 使两个会话各自有待审批卡片时互不串台。专家团实例传 'crew'。
+     */
+    private readonly sessionId: string = 'main'
   ) {}
 
   /** 工具定义（模型可见契约）。includeCrew=true 时附加 task.* 调度工具（Coordinator 专属） */
@@ -360,8 +365,8 @@ export class ToolRuntime {
       }
     }
 
-    // 权限网关：ask 级操作先审批
-    const gate = await this.gateway.check(tool, params, mode);
+    // 权限网关：ask 级操作先审批（带 sessionId，供渲染层投递到对应会话分区）
+    const gate = await this.gateway.check(tool, params, mode, this.sessionId);
     if (!gate.allowed) {
       return {
         ok: false,

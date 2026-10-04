@@ -35,13 +35,14 @@ const HIGH_RISK_TERMINAL: RegExp[] = [
 ];
 
 export class ApprovalGateway {
-  private listeners: Array<(card: ApprovalCard) => Promise<boolean>> = [];
+  // listener 带会话 id：审批卡要投递到对应会话的渲染分区（第 6 轮并行隔离）
+  private listeners: Array<(card: ApprovalCard, sessionId: string) => Promise<boolean>> = [];
   private goalPreAuthorized = false;
 
   constructor(private readonly sidecar: SidecarManager) {}
 
   /** 注册审批处理器（IPC 层把审批卡推给渲染层并等待用户响应） */
-  onApproval(handler: (card: ApprovalCard) => Promise<boolean>): void {
+  onApproval(handler: (card: ApprovalCard, sessionId: string) => Promise<boolean>): void {
     this.listeners.push(handler);
   }
 
@@ -57,7 +58,18 @@ export class ApprovalGateway {
     return this.goalPreAuthorized;
   }
 
-  async check(tool: string, params: unknown, mode: 'ask' | 'plan' | 'goal'): Promise<GatewayDecision> {
+  async check(
+    tool: string,
+    params: unknown,
+    mode: 'ask' | 'plan' | 'goal',
+    /**
+     * 发起本次检查的会话 id（第 6 轮并行隔离）。
+     * 由 ToolRuntime 在构造时注入 —— 每个会话一份 ToolRuntime，
+     * 因此这里能拿到**正确**的会话，不依赖任何全局可变状态
+     * （早先用单个 gatewaySessionId 变量在两个会话并发时会被后者覆盖）。
+     */
+    sessionId = 'main'
+  ): Promise<GatewayDecision> {
     const policy = this.policyFor(tool, params);
     if (policy === 'auto') {
       return { allowed: true };
@@ -89,7 +101,7 @@ export class ApprovalGateway {
     void this.sidecar.call('audit.note', { event: 'approval.request', tool, risk: card.risk }).catch(() => undefined);
     let approved = false;
     for (const l of this.listeners) {
-      approved = (await l(card)) || approved;
+      approved = (await l(card, sessionId)) || approved;
     }
     void this.sidecar
       .call('audit.note', { event: 'approval.result', tool, approved, approvalToken: token })

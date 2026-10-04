@@ -11,6 +11,7 @@ import {
   BudgetRespondPayload,
   Card,
   ChatSendPayload,
+  ChatSwitchResult,
   IPC,
   MemoryLoadResult,
   ModelsListResult,
@@ -18,11 +19,13 @@ import {
   SettingsSetPayload,
   UsageSnapshot,
 } from '@codara/contract';
+import type { ChatHistoryToolCall } from '@codara/contract';
 
 import { SettingsStore } from '../config/settingsStore';
 import { SidecarManager } from '../sidecar/manager';
 import { ModelClient } from '../model/client';
 import { AgentLoop, TaskMode } from '../loop/agentLoop';
+import { SessionRegistry } from '../loop/sessionRuntime';
 import { BudgetLedger } from '../budget/ledger';
 import { ToolRuntime } from '../tools/runtime';
 import { ApprovalGateway } from '../tools/gateway';
@@ -38,7 +41,13 @@ interface HandlerDeps {
   settings: SettingsStore;
   sidecar: SidecarManager;
   model: ModelClient;
-  loop: AgentLoop;
+  /**
+   * 会话运行时注册表（第 6 轮并行隔离核心）。
+   * 一个 sessionId 一份 AgentLoop + BudgetLedger + 审批等待表，
+   * 切换/新建会话不再触碰其它会话的运行态。
+   */
+  sessions: SessionRegistry;
+  /** 全局预算（仅 API Key 读写走它；会话级预算在 SessionRuntime 内） */
   budget: BudgetLedger;
   tools: ToolRuntime;
   scheduler: CrewScheduler;
@@ -187,27 +196,60 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   // ---------- 审批等待表（须在 chatSend 之前定义） ----------
   // 审批回调只能在注册期绑定一次：原实现放在 chatSend 内部，每次发送都会 push 一个新的
   // listener，导致第 N 次对话需要连点 N 次「批准」，且旧 listener 的 Promise 永不结算。
-  const approvalWaiters = new Map<string, (approved: boolean) => void>();
-  gateway.onApproval(async (card) => {
+  //
+  // 第 6 轮：审批按**会话**隔离。此前是一张全局 Map，chatAbort 会一次性 resolve
+  // 全部 token —— 两个会话各自有待审批时，批准 A 会把 B 的也一起判为拒绝。
+  // sessionId 由 gateway.check() 透传（每个会话一份 ToolRuntime，见 SessionRegistry），
+  // 不依赖任何全局可变状态，因此两个会话并发时不会串台。
+  const approvalWaitersBySession = new Map<string, Map<string, (approved: boolean) => void>>();
+  function waitersFor(sessionId: string): Map<string, (approved: boolean) => void> {
+    let m = approvalWaitersBySession.get(sessionId);
+    if (!m) {
+      m = new Map();
+      approvalWaitersBySession.set(sessionId, m);
+    }
+    return m;
+  }
+
+  gateway.onApproval(async (card, sessionId) => {
     const win = mainWindowRef();
+    const sid = sessionId || '__origin__';
     if (win && !win.isDestroyed()) {
-      win.webContents.send(IPC.approvalRequest, { card });
+      // 带上 sessionId：渲染层据此把卡片投递到对应会话的分区，而不是当前前台会话
+      win.webContents.send(IPC.approvalRequest, { card, sessionId: sid });
     }
     return new Promise<boolean>((resolve) => {
-      approvalWaiters.set(card.approvalToken, resolve);
+      waitersFor(sid).set(card.approvalToken, resolve);
     });
   });
 
   // ---------- 对话 ----------
+  //
+  // 会话归属解析（贯穿本文件所有会话相关 handler）：
+  //   显式 payload.sessionId > 注册表原点会话。
+  // 渲染层始终显式带上当前会话 id；缺省回落仅作兼容（旧调用方 / 竞态首帧）。
+  const resolveSessionId = (raw: unknown): string | null => {
+    if (typeof raw === 'string' && raw.length > 0) return raw;
+    return deps.sessions.origin();
+  };
+
   ipcMain.handle(IPC.chatSend, async (event, payload: unknown): Promise<boolean> => {
     const p = ChatSendSchema.parse(payload);
     const win = mainWindowRef();
     if (!win) return false;
+    // 每个会话一份 loop/budget —— 这是「切换会话不打断主任务」的关键。
+    const sessionId = resolveSessionId(p.sessionId);
+    if (!sessionId) return false;
+    const rt = deps.sessions.acquire(sessionId);
+    // 同一会话已有任务在跑：拒绝重入。
+    // 此前是 abort 掉旧的再跑新的（隐式抢占），在会话并行后语义混乱 ——
+    // 用户连点两次发送会把自己的提问截断。明确拒绝更安全。
+    if (rt.loop.isRunning()) return false;
     // 流式过程中窗口可能已被关闭：此后任何 webContents.send 都会抛
     // 「Object has been destroyed」并穿透为 uncaughtException 杀掉主进程。
     const alive = () => !win.isDestroyed();
     const sendCard = (card: Card) => {
-      if (alive()) win.webContents.send(IPC.chatEvent, { kind: 'card', card });
+      if (alive()) win.webContents.send(IPC.chatEvent, { kind: 'card', card, sessionId });
     };
 
     // 流式增量（节流 50ms 批量推送）
@@ -215,14 +257,14 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     let deltaTimer: NodeJS.Timeout | null = null;
     const flushDelta = () => {
       if (deltaBuf) {
-        if (alive()) win.webContents.send(IPC.chatEvent, { kind: 'delta', text: deltaBuf });
+        if (alive()) win.webContents.send(IPC.chatEvent, { kind: 'delta', text: deltaBuf, sessionId });
         deltaBuf = '';
       }
       deltaTimer = null;
     };
 
-    budget.startTask(`main-${Date.now()}`);
-    await deps.loop.run(p.text, p.mode as TaskMode, {
+    rt.budget.startTask(`main-${sessionId}`);
+    await rt.loop.run(p.text, p.mode as TaskMode, {
       onCard: sendCard,
       onDelta: (t) => {
         deltaBuf += t;
@@ -234,29 +276,52 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
         win.webContents.send(IPC.chatEvent, {
           kind: 'done',
           text: full,
-          usage: budget.snapshot(),
+          usage: rt.budget.snapshot(),
+          sessionId,
         });
       },
       onBudgetSuspended: () => {
-        if (alive()) win.webContents.send(IPC.budgetSuspended, budget.snapshot());
+        if (!alive()) return;
+        // 单个对象载荷：subscribe 只取第一个参数，拆成 (snapshot, sessionId)
+        // 会让渲染层永远拿不到 sessionId → 挂起提示串到别的会话。
+        win.webContents.send(IPC.budgetSuspended, {
+          ...rt.budget.snapshot(),
+          sessionId,
+        });
       },
     });
     return true;
   });
 
-  ipcMain.handle(IPC.chatAbort, async () => {
-    deps.loop.abort();
+  ipcMain.handle(IPC.chatAbort, async (_e, payload?: unknown) => {
+    // 定向中止：只停目标会话，其它会话的任务照常跑（第 6 轮核心修复）。
+    // 此前无论切会话还是点「停」，都 abort 全局唯一 loop → 连带掐死后台任务。
+    const sessionId = resolveSessionId(
+      (payload as { sessionId?: unknown } | undefined)?.sessionId
+    );
+    if (sessionId) {
+      deps.sessions.abort(sessionId);
+      const waiters = approvalWaitersBySession.get(sessionId);
+      if (waiters) {
+        for (const [token, resolve] of waiters) {
+          waiters.delete(token);
+          resolve(false);
+        }
+        approvalWaitersBySession.delete(sessionId);
+      }
+    }
     // 「停」即回到逐次审批（规格 4.7）
     gateway.setGoalPreAuthorized(false);
-    // 中止时结算所有挂起的审批 Promise，否则工具调用永远卡在等待，且 Map 无界增长
-    for (const [token, resolve] of approvalWaiters) {
-      approvalWaiters.delete(token);
-      resolve(false);
-    }
     return true;
   });
 
-  // 新建对话：切换新会话（原会话消息仍在 sidecar 中），清空 AgentLoop 工作记忆
+  // 新建对话：创建新会话并绑定。
+  //
+  // 第 6 轮：**不再 abort / reset**。此前这里无条件 loop.abort() + loop.reset()，
+  // 用户在主任务执行中点「+ 新建对话」会把正在跑的任务当场掐断
+  // （用户反馈：主任务「突然转到你那个其他的会话，然后快速停止」）。
+  // 现在每个会话一份 AgentLoop（见 SessionRegistry），切会话只是切渲染分区，
+  // 其它会话的运行态（messages / 流式 / 审批）完全不受影响。
   ipcMain.handle(
     IPC.chatNew,
     async (_e, payload?: unknown): Promise<{ ok: boolean; sessionId?: string; error?: string }> => {
@@ -265,14 +330,13 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
       // 否则一屏全是「对话 2026/9/28 18:49」这种无信息量的时间戳。
       const raw = (payload as { title?: unknown } | undefined)?.title;
       const title = typeof raw === 'string' ? raw.trim().slice(0, 24) : '';
-      deps.loop.abort();
-      gateway.setGoalPreAuthorized(false);
-      deps.loop.reset();
       const sess = await sidecar.call('session.create', { kind: 'main', title: title || `对话 ${new Date().toLocaleString('zh-CN')}` });
       const data = sess.data as { sessionId?: string } | undefined;
       if (sess.ok && data?.sessionId) {
-        deps.loop.attachMainSession(String(data.sessionId));
-        return { ok: true, sessionId: String(data.sessionId) };
+        const newId = String(data.sessionId);
+        // 为新会话建独立 runtime（此时还没有消息，loop 是干净的）
+        deps.sessions.acquire(newId);
+        return { ok: true, sessionId: newId };
       }
       return { ok: false, error: 'session create failed' };
     } catch (err) {
@@ -284,19 +348,12 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   // 切换会话：绑定目标会话并恢复历史消息为模型上下文（左栏对话列表点击）
   ipcMain.handle(
     IPC.chatSwitch,
-    async (
-      _e,
-      payload: unknown,
-    ): Promise<{
-      ok: boolean;
-      error?: string;
-      messages?: Array<{ role: string; content: string | null; toolName?: string }>;
-    }> => {
+    async (_e, payload: unknown): Promise<ChatSwitchResult> => {
     try {
       const p = z.object({ sessionId: z.string().min(1) }).parse(payload);
-      deps.loop.abort();
-      deps.loop.reset();
-      deps.loop.attachMainSession(p.sessionId);
+      // 第 6 轮：不再 abort/reset —— 切会话不得打断其它会话正在跑的任务。
+      // 目标会话的 runtime 若存在（之前聊过），沿用它保持上下文与运行态。
+      const rt = deps.sessions.acquire(p.sessionId);
       // 恢复历史（roleId=main 约定；失败不阻塞切换，仅失去模型上下文）
       const hist = await sidecar.call('msg.list', { sessionId: p.sessionId, roleId: 'main', limit: 200 });
       if (hist.ok) {
@@ -340,28 +397,83 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
               return (prev.tool_calls as Array<{ id?: string }>).some((t) => t.id === id);
             });
           });
-        deps.loop.loadMessages(history as never[]);
+        rt.loop.loadMessages(history as never[]);
         // 回传渲染层用于重建对话流：否则左栏切换会话后中栏一片空白，用户以为历史丢了。
         // ⚠️ 不能用「content 非空」过滤：带 tool_calls 的 assistant 行 content 恰好是 null
-        //    （上面 L319 刚归一过），一旦按 content 过滤就会把工具调用记录整条丢掉，
+        //    （上面刚归一过），一旦按 content 过滤就会把工具调用记录整条丢掉，
         //    只留下孤立的 role='tool' 行 —— 中栏变成一段无归属的原始 JSON，用户视角就是
-        //    「切换后对话内容消失了」。改为保留工具行，并带上工具名供渲染层可读呈现。
+        //    「切换后对话内容消失了」。
+        //
+        // 第 6 轮：工具行补 toolCalls 结构（此前只有一句「调用工具：xxx」文本），
+        // 否则切回会话后右栏「工具流水」永远是空的 —— 它只认 type='tool-call' 的卡，
+        // 而历史里从来没人生成过这种卡。args/result 都在主进程配好对，渲染层直接建卡。
+        const flat = rows.map((r) => {
+          const role = String(r.role ?? 'assistant');
+          const rawC = r.content;
+          let content: string | null = null;
+          if (typeof rawC === 'string') {
+            try {
+              const parsed = JSON.parse(rawC) as unknown;
+              content = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+            } catch {
+              content = rawC;
+            }
+          }
+          return { role, content, toolCalls: parsePersistedToolCalls(r.toolCalls) };
+        });
         return {
           ok: true,
           messages: history
             .filter((m) => Boolean(m.content) || Array.isArray(m.tool_calls) || m.role === 'tool')
-            .map((m) => {
+            .map((m, i) => {
               // assistant 带 tool_calls 且无正文时，用工具名合成一句可读摘要，避免中栏空白
               let content = typeof m.content === 'string' ? m.content : null;
               let toolName: string | undefined;
+              let toolCalls: ChatHistoryToolCall[] | undefined;
               if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
-                const names = (m.tool_calls as Array<{ function?: { name?: string } }>)
-                  .map((t) => t.function?.name)
-                  .filter((n): n is string => Boolean(n));
+                const calls = m.tool_calls as Array<{
+                  function?: { name?: string; arguments?: string };
+                }>;
+                const names = calls.map((t) => t.function?.name).filter((n): n is string => Boolean(n));
                 toolName = names.join(' / ');
                 if (!content && toolName) content = `调用工具：${toolName}`;
+                // 配对结果：OpenAI 格式下，assistant 的 N 个 tool_calls 之后紧跟 N 条
+                // role='tool' 消息（按顺序）。据此把参数与结果填回，渲染层才能生成
+                // 与实时运行同构的 ToolCallCard。
+                const results: Array<string | null> = [];
+                for (let k = 1; k <= calls.length; k++) {
+                  const nxt = flat[i + k];
+                  results.push(nxt && nxt.role === 'tool' ? nxt.content : null);
+                }
+                toolCalls = calls.map((t, k) => {
+                  const argsRaw = String(t.function?.arguments ?? '');
+                  let argsText = argsRaw;
+                  let ok = true;
+                  try {
+                    const parsed = JSON.parse(argsRaw) as unknown;
+                    argsText = JSON.stringify(parsed);
+                    const res = results[k];
+                    if (typeof res === 'string') {
+                      const r2 = JSON.parse(res) as { ok?: boolean };
+                      if (r2 && r2.ok === false) ok = false;
+                    }
+                  } catch {
+                    ok = false;
+                  }
+                  return {
+                    name: String(t.function?.name ?? 'tool'),
+                    args: argsText.slice(0, 2000),
+                    result: (results[k] ?? '').slice(0, 800),
+                    ok,
+                  };
+                });
               }
-              return { role: String(m.role), content, toolName };
+              return {
+                role: String(m.role),
+                content,
+                toolName,
+                ...(toolCalls ? { toolCalls } : {}),
+              };
             }),
         };
       }
@@ -374,8 +486,16 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
 
   // 主对话原点会话 id（启动时创建；chatNew 换会话不影响原点，左栏「主对话」回切用）
   ipcMain.handle(IPC.chatMainSession, async (): Promise<{ sessionId: string | null }> => {
-    return { sessionId: deps.loop.getMainSessionId() };
+    return { sessionId: deps.sessions.origin() };
   });
+
+  // 各会话运行态（渲染层左栏标「运行中」圆点；切换后仍能看到后台任务在跑）
+  ipcMain.handle(
+    IPC.chatRunning,
+    async (): Promise<{ running: string[] }> => {
+      return { running: deps.sessions.ids().filter((id) => deps.sessions.isRunning(id)) };
+    }
+  );
 
   // 历史会话列表（左栏对话列表数据源）。
   // 之前渲染层的 convs.list 是纯内存的：应用一重启就只剩「主对话」，用户以为
@@ -409,12 +529,14 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
     }
   });
 
-  // 用首条用户消息回填当前会话标题（左栏可辨识）。
-  // 会话归属由 AgentLoop 持有，渲染层不必知道 sessionId。
+  // 用首条用户消息回填会话标题（左栏可辨识）。
+  // 会话 id 由渲染层显式传入：并行会话下「当前会话」在主进程已无单一概念，
+  // 若继续用 loop.getMainSessionId() 就会把 A 会的标题写到 B 会上。
   ipcMain.handle(IPC.chatRename, async (_e, payload: unknown): Promise<boolean> => {
     try {
-      const title = String((payload as { title?: unknown } | undefined)?.title ?? '').trim();
-      const sid = deps.loop.getMainSessionId();
+      const raw = (payload as { title?: unknown; sessionId?: unknown } | undefined) ?? {};
+      const title = String(raw.title ?? '').trim();
+      const sid = resolveSessionId(raw.sessionId);
       if (!title || !sid) return false;
       const res = await sidecar.call('session.rename', { sessionId: sid, title: title.slice(0, 24) });
       return res.ok;
@@ -425,23 +547,28 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   });
 
   // 删除会话：级联删掉 sidecar 里的 sessions + messages 行。
-  // 若删的正是当前绑定的会话，必须同时把 AgentLoop 的上下文清掉并回退到主对话，
-  // 否则后续消息仍会写到已删除的 sessionId 上（写入静默失败）或读到悬空上下文。
+  // 第 6 轮：**不再 abort 全局 loop / reset**。删除只影响目标会话：
+  //   - 该会话正在跑 → 只 abort 它（否则删掉后台正在跑的任务仍会继续写库）；
+  //   - 其余会话的 loop/流式/审批完全不动。
+  // 渲染层负责在删除当前会话后切到别的会话（它才有 activeId 概念）。
   ipcMain.handle(
     IPC.chatDelete,
     async (_e, payload: unknown): Promise<{ ok: boolean; error?: string }> => {
     try {
       const p = z.object({ sessionId: z.string().min(1) }).parse(payload);
-      const wasActive = deps.loop.getActiveSessionId() === p.sessionId;
       const res = await sidecar.call('session.delete', { sessionId: p.sessionId });
       if (!res.ok) return { ok: false, error: res.error?.message ?? 'session.delete failed' };
-      if (wasActive) {
-        // 回退到主对话原点：清空工作记忆并重新绑定原点会话（若有）
-        deps.loop.abort();
-        gateway.setGoalPreAuthorized(false);
-        deps.loop.reset();
-        deps.loop.detachAndReturnToOrigin(p.sessionId);
+      // 回收该会话的 runtime（含 abort + 结算其审批等待）
+      deps.sessions.drop(p.sessionId);
+      const waiters = approvalWaitersBySession.get(p.sessionId);
+      if (waiters) {
+        for (const [token, resolve] of waiters) {
+          waiters.delete(token);
+          resolve(false);
+        }
+        approvalWaitersBySession.delete(p.sessionId);
       }
+      gateway.setGoalPreAuthorized(false);
       return { ok: true };
     } catch (err) {
       logger.warn('chat delete failed', err);
@@ -459,11 +586,15 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   });
 
   // ---------- 审批响应（等待表与 listener 已在「对话」段之前注册一次） ----------
+  // sessionId 必带：token 在各自会话的等待表里，缺省无法定位是哪条审批。
   ipcMain.handle(IPC.approvalRespond, async (_e, payload: unknown): Promise<boolean> => {
     const p = ApprovalRespondSchema.parse(payload);
-    const waiter = approvalWaiters.get(p.approvalToken);
+    const sid = resolveSessionId(p.sessionId);
+    if (!sid) return false;
+    const waiters = approvalWaitersBySession.get(sid);
+    const waiter = waiters?.get(p.approvalToken);
     if (waiter) {
-      approvalWaiters.delete(p.approvalToken);
+      waiters!.delete(p.approvalToken);
       waiter(p.approved);
       return true;
     }
@@ -471,35 +602,45 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   });
 
   // ---------- 预算 ----------
+  // 多会话并行后预算按会话独立计量：快照必须把所有 runtime 相加，
+  // 否则用户同时跑两条任务，顶栏/设置页只显示一条的消耗。
   ipcMain.handle(IPC.usageSnapshot, async (): Promise<UsageSnapshot> => {
-    const snap = budget.snapshot();
+    const total = deps.sessions.totalUsage();
+    const limits = settings.get('budget');
     return {
       today: {
-        promptTokens: snap.task.promptTokens,
-        completionTokens: snap.task.completionTokens,
-        costCNY: snap.task.costCNY,
+        promptTokens: total.task.promptTokens,
+        completionTokens: total.task.completionTokens,
+        costCNY: total.task.costCNY,
       },
       currentTask: {
-        promptTokens: snap.task.promptTokens,
-        completionTokens: snap.task.completionTokens,
-        costCNY: snap.task.costCNY,
-        turns: snap.turns,
+        promptTokens: total.task.promptTokens,
+        completionTokens: total.task.completionTokens,
+        costCNY: total.task.costCNY,
+        turns: total.turns,
       },
       budget: {
-        turnsLimit: snap.budget.turnsLimit,
-        tokenLimit: snap.budget.tokenLimit,
-        costLimitCNY: snap.budget.costLimitCNY,
-        suspended: snap.suspended,
+        turnsLimit: limits.turnsLimit,
+        tokenLimit: limits.tokenLimit,
+        costLimitCNY: limits.costLimitCNY,
+        suspended: total.suspended,
       },
     };
   });
 
   ipcMain.handle(IPC.budgetRespond, async (_e, payload: unknown): Promise<boolean> => {
     const p = BudgetRespondSchema.parse(payload);
+    const sid = resolveSessionId(p.sessionId);
     if (p.action === 'extend') {
-      budget.extend(p.newTokenLimit, p.newCostLimitCNY);
+      // 续预算按会话发放：把新上限写到发起该请求的会话账上。
+      // 缺省时退化为「所有会话都续」——旧调用方只有全局预算一个概念。
+      const targets = sid ? [sid] : deps.sessions.ids();
+      for (const id of targets) {
+        deps.sessions.acquire(id).budget.extend(p.newTokenLimit, p.newCostLimitCNY);
+      }
     } else if (p.action === 'terminate') {
-      deps.loop.abort();
+      // 终止只停目标会话；其余会话的预算熔断状态不受影响
+      if (sid) deps.sessions.abort(sid);
     }
     // reduce：注入缩减指令由 M4 Goal 细化
     return true;
@@ -529,6 +670,9 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
   // ---------- 崩溃恢复（M4，规格 4.6） ----------
   ipcMain.handle(IPC.recoveryResolve, async (_e, payload: unknown): Promise<unknown> => {
     const p = RecoveryResolveSchema.parse(payload);
+    const recoverySession = resolveSessionId(
+      (payload as { sessionId?: unknown } | undefined)?.sessionId
+    );
     for (const name of p.names) {
       if (p.action === 'resume') {
         // 恢复：释放过期锁 + 加载最后检查点回放给对话流
@@ -536,9 +680,11 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
         const ckpt = await sidecar.call('ckpt.load', { taskId: name }).catch(() => undefined);
         const win = mainWindowRef();
         if (win && ckpt?.ok) {
+          // 带 sessionId：并行会话下这条「恢复」提示必须落回对应会话的流
           win.webContents.send(IPC.chatEvent, {
             kind: 'done',
             text: `【崩溃恢复】任务 ${name} 已从最后检查点恢复。\n检查点内容：${JSON.stringify((ckpt.data as { payload?: unknown })?.payload ?? {}).slice(0, 2000)}`,
+            ...(recoverySession ? { sessionId: recoverySession } : {}),
           });
         }
         logger.info('recovery resumed', { name });
@@ -612,6 +758,8 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
 const ChatSendSchema = z.object({
   text: z.string().min(1).max(32000),
   mode: z.enum(['ask', 'plan', 'goal']),
+  /** 目标会话 id（第 6 轮并行隔离：渲染层必须显式指定，缺省回落原点会话） */
+  sessionId: z.string().min(1).optional(),
 });
 
 const CrewStartTaskSchema = z.object({
@@ -683,12 +831,16 @@ const SettingsSetSchema = z.object({
 const ApprovalRespondSchema = z.object({
   approvalToken: z.string(),
   approved: z.boolean(),
+  /** 审批卡所属会话（第 6 轮：等待表按会话分桶，缺省无法定位） */
+  sessionId: z.string().min(1).optional(),
 });
 
 const BudgetRespondSchema = z.object({
   action: z.enum(['extend', 'reduce', 'terminate']),
   newTokenLimit: z.number().optional(),
   newCostLimitCNY: z.number().optional(),
+  /** 预算所属会话；缺省时 extend 作用于全部会话、terminate 不执行 */
+  sessionId: z.string().min(1).optional(),
 });
 
 /**

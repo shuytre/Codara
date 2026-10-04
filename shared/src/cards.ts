@@ -22,6 +22,13 @@ export interface CardBase {
   createdAt: number;
   /** 关联任务 ID（M3/M4） */
   taskId?: string;
+  /**
+   * 所属会话（第 6 轮并行隔离）。
+   * 渲染层按它把卡片投递到对应会话的分区；缺省时由事件 payload 上的 sessionId 补齐。
+   * 没有这个字段时，两个会话同时跑工具，卡片会全部堆到当前前台会话 —— 用户切回来
+   * 看到的是另一个任务的工具流水。
+   */
+  sessionId?: string;
 }
 
 export interface PlanCard extends CardBase {
@@ -41,6 +48,12 @@ export interface ToolCallCard extends CardBase {
   type: 'tool-call';
   tool: string;
   paramsSummary: string;
+  /**
+   * 单行可读摘要（第 6 轮）：形如 `search · pattern=*.ts · mode=files`。
+   * paramsSummary 是 JSON.stringify 的截断串，直接展示会是一整块裸 JSON；
+   * 渲染层改为默认只显示这一行，点击才展开 paramsSummary。
+   */
+  summaryLine?: string;
   result?: string;
   ok?: boolean;
   cacheRef?: string;

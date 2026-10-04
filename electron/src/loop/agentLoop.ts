@@ -48,6 +48,8 @@ export class AgentLoop {
   private pendingPlan: PlanCard | null = null;
   /** 本轮运行的终止控制器：中断流式请求 / 工具执行 / 审批等待 */
   private runAbort: AbortController | null = null;
+  /** 本 loop 是否正处于一轮 run() 之中（会话并行后供左栏标注「运行中」） */
+  private running = false;
   /** abort 时唤醒所有 race 等待点 */
   private abortWaiters: Array<() => void> = [];
 
@@ -97,6 +99,15 @@ export class AgentLoop {
     this.planApproved = true;
   }
 
+  /**
+   * 本 loop 当前是否正在跑一轮任务。
+   * 第 6 轮：会话并行后，渲染层左栏需要区分「运行中」与「空闲」会话 ——
+   * 判据必须是 loop 自身的运行态，不能靠「最近有没有收到消息」猜。
+   */
+  isRunning(): boolean {
+    return this.running;
+  }
+
   reset(): void {
     this.messages = [];
     this.planApproved = false;
@@ -111,6 +122,17 @@ export class AgentLoop {
   }
 
   async run(userText: string, mode: TaskMode, cb: LoopCallbacks, crew?: CrewRunContext): Promise<void> {
+    // running 标记必须覆盖**所有**退出路径（含 abort / 预算熔断 / 工具抛错的早退），
+    // 否则会话会在任务早已结束后仍被左栏标成「运行中」。
+    this.running = true;
+    try {
+      await this.runInner(userText, mode, cb, crew);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  private async runInner(userText: string, mode: TaskMode, cb: LoopCallbacks, crew?: CrewRunContext): Promise<void> {
     this.aborted = false;
     this.runAbort = new AbortController();
     const signal = this.runAbort.signal;
@@ -257,6 +279,10 @@ export class AgentLoop {
           paramsSummary: argsError
             ? `（arguments 不可用）${(tc.arguments || '').slice(0, 280)}`
             : `${coercedNote ? `（已自愈：${coercedNote}）` : ''}${JSON.stringify(params).slice(0, 300)}`,
+          // 单行摘要：渲染层默认只显示这一行，paramsSummary 收在折叠里
+          summaryLine: argsError
+            ? `${tc.name} · arguments 不可用`
+            : toolSummaryLine(tc.name, params, coercedNote),
         };
         cb.onCard(card);
 
@@ -710,4 +736,41 @@ function buildSystemPrompt(mode: TaskMode, toolNames: string[]): string {
     return base + '\n\n当前任务模式：Plan。先探查定位，改动前输出分步计划（每步含验证方式），获得批准后执行。';
   }
   return base + '\n\n当前任务模式：Goal。给定目标后挂机自驱直到达成或卡点；每个关键动作仍走审批卡，高危动作无论是否预授权都必人工点批准。';
+}
+
+/**
+ * 工具调用的一行可读摘要：`search · pattern=*.ts · mode=files`。
+ *
+ * 第 6 轮：工具卡此前默认展开 paramsSummary（JSON.stringify 截断串），
+ * 一屏几十行裸 JSON。这里给出稳定的摘要行，渲染层默认只显示它。
+ * 规则：
+ *  - 只取前 3 个参数，按「标量直接给值 / 长串截断 / 数组给长度 / 对象给键数」呈现；
+ *  - 空参数就只显示工具名；
+ *  - 参数被自愈过就前置提示（这是排查「工具为什么改了参数」的关键线索，不能丢）。
+ */
+export function toolSummaryLine(tool: string, params: unknown, note?: string | null): string {
+  const parts: string[] = [];
+  if (params && typeof params === 'object' && !Array.isArray(params)) {
+    for (const [k, v] of Object.entries(params as Record<string, unknown>)) {
+      if (v === undefined || v === null || v === '') continue;
+      if (typeof v === 'string') {
+        parts.push(`${k}=${v.length > 40 ? v.slice(0, 40) + '…' : v}`);
+      } else if (typeof v === 'number' || typeof v === 'boolean') {
+        parts.push(`${k}=${String(v)}`);
+      } else if (Array.isArray(v)) {
+        parts.push(`${k}=[${v.length}]`);
+      } else {
+        try {
+          parts.push(`${k}={${Object.keys(v as object).length} keys}`);
+        } catch {
+          parts.push(`${k}=…`);
+        }
+      }
+      if (parts.length >= 3) break;
+    }
+  } else if (typeof params === 'string' && params.length > 0) {
+    parts.push(params.length > 40 ? params.slice(0, 40) + '…' : params);
+  }
+  const prefix = note ? `（已自愈：${note}）` : '';
+  return parts.length > 0 ? `${prefix}${tool} · ${parts.join(' · ')}` : `${prefix}${tool}`;
 }

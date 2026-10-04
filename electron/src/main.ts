@@ -7,7 +7,7 @@ import { SidecarManager } from './sidecar/manager';
 import { SettingsStore } from './config/settingsStore';
 import { ModelClient } from './model/client';
 import { BudgetLedger } from './budget/ledger';
-import { AgentLoop } from './loop/agentLoop';
+import { SessionRegistry } from './loop/sessionRuntime';
 import { ApprovalGateway } from './tools/gateway';
 import { ToolRuntime } from './tools/runtime';
 import { CrewScheduler } from './crew/scheduler';
@@ -82,15 +82,19 @@ async function onReady(): Promise<void> {
   });
   const tools = new ToolRuntime(sidecar, budget, gateway, settings, scheduler);
   scheduler.attachTools(tools);
-  const loop = new AgentLoop(model, sidecar, settings, budget, tools);
 
-  // 主对话会话（kind=main，roleId=main 持久化）
+  // 第 6 轮：主对话改为**按会话隔离**。每个 sessionId 一份 AgentLoop + BudgetLedger，
+  // 由 SessionRegistry 懒创建。此前只有一个全局 AgentLoop，切/新建会话只能
+  // abort()+reset()，把正在跑的任务当场掐断。
+  const sessions = new SessionRegistry({ model, sidecar, settings, scheduler, gateway });
+
+  // 主对话会话（kind=main，roleId=main 持久化）——注册为原点会话
   if (sidecarReady) {
     try {
       const mainSess = await sidecar.call('session.create', { kind: 'main', title: '主对话' });
       const sessData = mainSess.data as { sessionId?: string } | undefined;
       if (mainSess.ok && sessData?.sessionId) {
-        loop.attachMainSession(String(sessData.sessionId));
+        sessions.setOrigin(String(sessData.sessionId));
       }
     } catch (err) {
       logger.warn('main session create failed', err);
@@ -102,7 +106,7 @@ async function onReady(): Promise<void> {
     settings,
     sidecar,
     model,
-    loop,
+    sessions,
     budget,
     tools,
     scheduler,

@@ -52,6 +52,14 @@ button.small { padding: 3px 8px; font-size: 12px; }
 .conv-del:hover { background: rgba(220, 38, 38, .12); color: #dc2626; }
 .conv-item.active .conv-del { color: rgba(255, 255, 255, .7); }
 .conv-item.active .conv-del:hover { background: rgba(255, 255, 255, .18); color: #fff; }
+/* 「正在运行」圆点（第 6 轮会话并行）：切到别的会话后仍要能看出哪个在跑。
+   没有它，用户只能靠猜 —— 而切走以后恰恰最需要这个提示。 */
+.conv-running {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--cobalt); animation: conv-pulse 1.2s ease-in-out infinite;
+}
+.conv-item.active .conv-running { background: #7fb2ff; }
+@keyframes conv-pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
 
 /* 中栏 */
 .center-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -61,13 +69,20 @@ button.small { padding: 3px 8px; font-size: 12px; }
 .empty-state .hint { color: var(--ink-tertiary); font-size: 12px; margin-top: 6px; }
 
 .entry { margin-bottom: 18px; max-width: 860px; }
-.entry-user { margin-left: auto; background: var(--cobalt); color: #fff; border-radius: 10px 10px 2px 10px; padding: 10px 14px; }
+/* 用户气泡靠左：此前 margin-left:auto 把它推到右边，左边留出大片空白（用户要求「不要靠右，靠左」）。
+   对齐方式改用 margin-right:auto，气泡宽度随内容自适应、靠左排列。 */
+.entry-user { margin-right: auto; background: var(--cobalt); color: #fff; border-radius: 4px 10px 10px 10px; padding: 10px 14px; }
 .entry-user .entry-meta { display: none; }
 .entry-assistant { background: var(--bg-panel); border: 1px solid var(--hairline); border-radius: 10px 10px 10px 2px; padding: 12px 14px; }
 .entry-system { color: var(--ink-tertiary); font-size: 12px; padding: 6px; }
+/* 工具卡事件条目：只有卡片、没有气泡外壳（此前卡片被塞进 assistant 条目，
+   于是工具流水看起来像助手正文的一部分；拆成独立 entry 后顺序也才对得上真实事件）。 */
+.entry-event { background: none; border: none; padding: 0; margin-bottom: 8px; }
 .entry-meta { display: flex; gap: 10px; font-size: 11px; color: var(--ink-tertiary); margin-bottom: 6px; }
 .entry-meta .role { font-weight: 700; }
-.entry-user .entry-text { font-size: 14px; white-space: pre-wrap; }
+/* 不再 white-space: pre-wrap —— marked 的 breaks:true 已把真实换行转成 <br>，
+   pre-wrap 只会额外保留 markdown 解析残留的空白文本节点，在气泡里多出一行空行。 */
+.entry-user .entry-text { font-size: 14px; }
 
 /* 轻量思考状态行（替代独立卡片）：小圆点脉冲 + 灰字，无卡片框 */
 .thinking-row {
@@ -102,6 +117,25 @@ button.small { padding: 3px 8px; font-size: 12px; }
 .exit.bad { color: var(--red-danger); font-family: var(--mono); font-size: 11px; }
 .spill { padding: 6px 12px; font-size: 11px; color: var(--amber-warn); background: #fef9ec; }
 pre.card-body { white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; }
+
+/* 工具调用卡：默认折叠为一行摘要（第 6 轮）
+   此前整块 paramsSummary（JSON.stringify 截断串）直接铺开，一屏几十行裸 JSON。 */
+.card-tool { margin-top: 6px; }
+.tool-summary {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 10px; border: none; background: var(--bg-hover); cursor: pointer;
+  font-size: 12px; color: var(--ink-secondary); text-align: left;
+}
+.tool-summary:hover { background: var(--bg-panel); }
+.tool-caret { font-size: 10px; color: var(--ink-tertiary); transition: transform .15s ease; flex: none; }
+.tool-caret.open { transform: rotate(90deg); }
+.tool-name { font-weight: 700; color: var(--cobalt); flex: none; }
+.tool-args { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-state { font-size: 10px; color: var(--ink-tertiary); flex: none; }
+.tool-mark { flex: none; font-size: 11px; }
+.tool-mark.ok { color: var(--green-ok); }
+.tool-mark.bad { color: var(--red-danger); }
+.card-tool .card-body { border-top: 1px solid var(--hairline); color: var(--ink-secondary); }
 
 /* 输入区 */
 .composer { flex: none; padding: 12px 22px 16px; background: var(--bg); border-top: 1px solid var(--hairline); }

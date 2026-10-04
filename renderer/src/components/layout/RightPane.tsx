@@ -1,14 +1,21 @@
 // 右栏：上下文侧栏（改动文件/审批队列/终端标签/交接物/审计/用量）
-import { Show, For } from 'solid-js';
+//
+// 第 6 轮：数据源改为**当前会话分区**（activeCards）。
+// 此前读全局 cards.list：切会话后右栏仍显示另一个会话的工具流水，
+// 而新会话因为历史路径从不生成 tool-call 卡，就恒为「暂无工具调用」。
+import { Show, For, createMemo } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
-import { cards, usage } from '../../state/stores';
+import { activeCards, activeKey, convs, usage } from '../../state/stores';
 import { UsagePanel } from '../usage/UsagePanel';
 
 export function RightPane() {
   const b = bridge();
-  const pendingApprovals = () => cards.list.filter((c) => c.type === 'approval' && c.status === 'pending');
-  const toolCalls = () => cards.list.filter((c) => c.type === 'tool-call');
+  const key = createMemo(() => activeKey());
+  const pendingApprovals = createMemo(() => activeCards().filter((c) => c.type === 'approval' && c.status === 'pending'));
+  const toolCalls = createMemo(() => activeCards().filter((c) => c.type === 'tool-call'));
+  // 续预算/终止必须作用于发起请求的那个会话的账
+  const targetSession = () => key();
 
   return (
     <aside class="right-pane">
@@ -40,15 +47,19 @@ export function RightPane() {
           <button
             class="primary full"
             onClick={() =>
-              b.budgetRespond({ action: 'extend', newTokenLimit: (usage.budget.tokenLimit || 0) + 500000 })
+              b.budgetRespond({
+                action: 'extend',
+                newTokenLimit: (usage.budget.tokenLimit || 0) + 500000,
+                sessionId: targetSession(),
+              })
             }
           >
             续预算
           </button>
-          <button class="full" onClick={() => b.budgetRespond({ action: 'reduce' })}>
+          <button class="full" onClick={() => b.budgetRespond({ action: 'reduce', sessionId: targetSession() })}>
             缩减范围
           </button>
-          <button class="danger full" onClick={() => b.budgetRespond({ action: 'terminate' })}>
+          <button class="danger full" onClick={() => b.budgetRespond({ action: 'terminate', sessionId: targetSession() })}>
             终止任务
           </button>
         </div>

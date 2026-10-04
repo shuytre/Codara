@@ -1,8 +1,21 @@
 // 输入区：Codex 式布局 —— 输入框（模式选择器内嵌左下角）+ 底部工具行（提示 / 模型切换 + 发送/终止）
-import { createSignal, For, Show } from 'solid-js';
+import { createSignal, createMemo, For, Show } from 'solid-js';
 
 import { bridge } from '../../ipc/client';
-import { appendEntry, chat, setChat, setSettings, settings, setUi, setUsage, usage } from '../../state/stores';
+import {
+  activeChat,
+  activeKey,
+  appendEntry,
+  chat,
+  setChat,
+  setSessionRunning,
+  setSettings,
+  setStreaming,
+  settings,
+  setUi,
+  setUsage,
+  usage,
+} from '../../state/stores';
 
 /** 原生下拉选项（ask=极简直干少工具；plan=标准全工具；goal=挂机自驱） */
 const MODE_OPTIONS: Array<{ id: 'ask' | 'plan' | 'goal'; label: string; tip: string }> = [
@@ -28,6 +41,14 @@ export function Composer() {
   const [ck1, setCk1] = createSignal(false);
   const [ck2, setCk2] = createSignal(false);
   const [ck3, setCk3] = createSignal(false);
+
+  /**
+   * 「发送/终止」按钮的忙碌态。
+   * 必须看**当前会话**是否在跑，而不是本组件的 sending()：
+   * 会话并行后，用户切到另一个正在跑任务的会话，此时 sending() 早已是 false ——
+   * 按钮会显示成「发送」，用户既看不到任务在跑，也点不到「停」。
+   */
+  const busy = createMemo(() => sending() || activeChat().streaming);
 
   // 当前厂商可用模型（向导在线拉取的多选列表；缺省回退当前模型）
   const modelOptions = (): string[] => {
@@ -56,6 +77,9 @@ export function Composer() {
   const send = async () => {
     const t = text().trim();
     if (!t || sending()) return;
+    // 目标会话必须在发送瞬间锁定：await 期间用户可能切了会话，
+    // 若之后再读 activeKey()，这条提问会挂到别的会话上（用户反馈「主任务突然转到别的会话」）。
+    const key = activeKey();
     // Goal 模式且未预授权：先弹预授权告知卡（预授权通过后不再拦截）
     if (chat.mode === 'goal' && !preauthorized()) {
       setPrecheckOpen(true);
@@ -65,20 +89,21 @@ export function Composer() {
     // 首条用户消息决定会话标题：左栏列表才有可辨识的名字（否则全是「新对话 18:49」）。
     // 标题写回 sidecar 的 sessions 表，重启后仍能在左栏看到有意义的名称。
     const firstLine = t.split('\n')[0]?.trim() ?? '';
-    const isFirstUserTurn = chat.entries.filter((e) => e.role === 'user').length === 0;
+    const isFirstUserTurn = activeChat().entries.filter((e) => e.role === 'user').length === 0;
     if (isFirstUserTurn && firstLine) {
-      void b.chatRename({ title: firstLine.slice(0, 24) }).catch(() => undefined);
+      void b.chatRename({ title: firstLine.slice(0, 24), sessionId: key }).catch(() => undefined);
     }
-    appendEntry({ id: `u-${Date.now()}`, role: 'user', text: t, createdAt: Date.now() });
-    setChat({ streaming: true, streamText: '' });
+    appendEntry(key, { id: `u-${Date.now()}`, role: 'user', text: t, createdAt: Date.now() });
+    setStreaming(key, true);
+    setSessionRunning(key, true);
     setSending(true);
     try {
-      await b.chatSend({ text: t, mode: chat.mode });
+      await b.chatSend({ text: t, mode: chat.mode, sessionId: key });
     } catch (err) {
       // 原实现无 catch：端点不可达/未配 Key 时表现为「输入框清空了、什么都没发生」
       const msg = err instanceof Error ? err.message : String(err);
       setUi({ toast: `发送失败：${msg}` });
-      appendEntry({
+      appendEntry(key, {
         id: `s-${Date.now()}`,
         role: 'system' as never,
         text: `发送失败：${msg}。请检查模型配置（端点与 API Key）后重试。`,
@@ -86,7 +111,8 @@ export function Composer() {
       });
     } finally {
       setSending(false);
-      setChat({ streaming: false });
+      setStreaming(key, false);
+      setSessionRunning(key, false);
       // 刷新用量（失败不影响主流程，且不能放在 finally 里 await，否则会掩盖上面的异常）
       void b.usageSnapshot().then(setUsage).catch(() => undefined);
     }
@@ -109,8 +135,11 @@ export function Composer() {
   };
 
   const abort = async () => {
-    await b.chatAbort();
-    setChat({ streaming: false });
+    // 定向终止：只停当前会话的任务。缺省 sessionId 会让主进程回落原点会话，
+    // 用户在子会话点「停」却把主对话掐了。
+    await b.chatAbort({ sessionId: activeKey() });
+    setStreaming(activeKey(), false);
+    setSessionRunning(activeKey(), false);
     // 主进程已撤销 Goal 预授权，本地状态同步回退
     setPreauthorized(false);
   };
@@ -202,7 +231,7 @@ export function Composer() {
             </select>
           </Show>
           <Show
-            when={!sending()}
+            when={!busy()}
             fallback={
               <button class="send-btn danger" onClick={abort} title="终止">
                 <IconStop />

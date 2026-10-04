@@ -17,17 +17,19 @@ const api = {
   settingsReset: () => ipcRenderer.invoke(IPC.settingsReset),
   modelsList: (payload: ModelsListPayload) => ipcRenderer.invoke(IPC.modelsList, payload),
   chatSend: (payload: ChatSendPayload) => ipcRenderer.invoke(IPC.chatSend, payload),
-  chatAbort: () => ipcRenderer.invoke(IPC.chatAbort),
+  // 定向中止：必须带 sessionId，否则主进程无从知道停哪一条任务
+  chatAbort: (payload?: { sessionId?: string }) => ipcRenderer.invoke(IPC.chatAbort, payload),
   chatNew: (payload?: { title?: string }) => ipcRenderer.invoke(IPC.chatNew, payload),
   chatSwitch: (payload: { sessionId: string }) => ipcRenderer.invoke(IPC.chatSwitch, payload),
   chatMainSession: () => ipcRenderer.invoke(IPC.chatMainSession),
+  chatRunning: () => ipcRenderer.invoke(IPC.chatRunning),
   chatList: () => ipcRenderer.invoke(IPC.chatList),
-  chatRename: (payload: { title: string }) => ipcRenderer.invoke(IPC.chatRename, payload),
+  chatRename: (payload: { title: string; sessionId?: string }) => ipcRenderer.invoke(IPC.chatRename, payload),
   chatDelete: (payload: { sessionId: string }) => ipcRenderer.invoke(IPC.chatDelete, payload),
-  approvalRespond: (payload: { approvalToken: string; approved: boolean }) =>
+  approvalRespond: (payload: { approvalToken: string; approved: boolean; sessionId?: string }) =>
     ipcRenderer.invoke(IPC.approvalRespond, payload),
   usageSnapshot: () => ipcRenderer.invoke(IPC.usageSnapshot),
-  budgetRespond: (payload: { action: 'extend' | 'reduce' | 'terminate'; newTokenLimit?: number; newCostLimitCNY?: number }) =>
+  budgetRespond: (payload: { action: 'extend' | 'reduce' | 'terminate'; newTokenLimit?: number; newCostLimitCNY?: number; sessionId?: string }) =>
     ipcRenderer.invoke(IPC.budgetRespond, payload),
   modeSet: (mode: string) => ipcRenderer.invoke(IPC.modeSet, mode),
   workspaceOpen: () => ipcRenderer.invoke(IPC.workspaceOpen),
@@ -51,7 +53,7 @@ const api = {
   indexConfigure: (payload: { semantic?: boolean }) => ipcRenderer.invoke(IPC.indexConfigure, payload),
   indexBuild: () => ipcRenderer.invoke(IPC.indexBuild),
   onChatEvent: (cb: (payload: unknown) => void) => subscribe(IPC.chatEvent, cb),
-  onApprovalRequest: (cb: (payload: { card: ApprovalCard }) => void) => subscribe(IPC.approvalRequest, cb),
+  onApprovalRequest: (cb: (payload: { card: ApprovalCard; sessionId?: string }) => void) => subscribe(IPC.approvalRequest, cb),
   onBudgetSuspended: (cb: (payload: unknown) => void) => subscribe(IPC.budgetSuspended, cb),
   onCrewInstance: (cb: (payload: unknown) => void) => subscribe(IPC.crewInstance, cb),
   onCrewTask: (cb: (payload: unknown) => void) => subscribe(IPC.crewTask, cb),

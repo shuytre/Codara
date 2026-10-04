@@ -4,7 +4,9 @@ import type {
   ApprovalRespondPayload,
   BudgetRespondPayload,
   Card,
+  ChatEventPayload,
   ChatSendPayload,
+  ChatSwitchResult,
   CrewSpawnPayload,
   CrewInstanceView,
   CrewTaskView,
@@ -22,14 +24,17 @@ export interface CodaraBridge {
   settingsReset(): Promise<boolean>;
   modelsList(payload: ModelsListPayload): Promise<ModelsListResult>;
   chatSend(payload: ChatSendPayload): Promise<boolean>;
-  chatAbort(): Promise<boolean>;
+  /** 定向中止：必须带 sessionId，否则停的是主对话而不是当前会话 */
+  chatAbort(payload?: { sessionId?: string }): Promise<boolean>;
   chatNew(payload?: { title?: string }): Promise<{ ok: boolean; sessionId?: string; error?: string }>;
-  chatSwitch(payload: { sessionId: string }): Promise<{ ok: boolean; error?: string; messages?: Array<{ role: string; content: string | null; toolName?: string }> }>;
+  chatSwitch(payload: { sessionId: string }): Promise<ChatSwitchResult>;
   chatMainSession(): Promise<{ sessionId: string | null }>;
+  /** 正在跑任务的会话 id 集合（左栏「运行中」圆点） */
+  chatRunning(): Promise<{ running: string[] }>;
   /** 历史会话列表（左栏对话列表）：直接读 sidecar sessions 表，重启不丢 */
   chatList(): Promise<ConversationListResult>;
   /** 用首条用户消息回填当前会话标题 */
-  chatRename(payload: { title: string }): Promise<boolean>;
+  chatRename(payload: { title: string; sessionId?: string }): Promise<boolean>;
   /** 删除会话（级联删消息）；删除当前会话后主进程回退到主对话 */
   chatDelete(payload: { sessionId: string }): Promise<{ ok: boolean; error?: string }>;
   approvalRespond(payload: ApprovalRespondPayload): Promise<boolean>;
@@ -55,7 +60,7 @@ export interface CodaraBridge {
   indexBuild(): Promise<Record<string, unknown>>;
   // main → renderer 事件订阅
   onChatEvent(cb: (payload: ChatEventPayload) => void): () => void;
-  onApprovalRequest(cb: (payload: { card: ApprovalCard }) => void): () => void;
+  onApprovalRequest(cb: (payload: { card: ApprovalCard; sessionId?: string }) => void): () => void;
   onBudgetSuspended(cb: (payload: unknown) => void): () => void;
   onCrewInstance(cb: (payload: CrewInstanceView) => void): () => void;
   onCrewTask(cb: (payload: { taskId: string; title: string; status: string }) => void): () => void;
@@ -64,10 +69,7 @@ export interface CodaraBridge {
   onRecoveryNeeded(cb: (payload: { locks: Array<{ name: string; owner: string; heartbeat: number }> }) => void): () => void;
 }
 
-export type ChatEventPayload =
-  | { kind: 'delta'; text: string }
-  | { kind: 'card'; card: Card }
-  | { kind: 'done'; text: string; usage?: unknown };
+export type { ChatEventPayload, ChatSwitchResult } from '@codara/contract';
 
 /** chat:list 响应体：左栏对话列表（元信息，不含消息正文） */
 export interface ConversationListResult {
@@ -110,6 +112,7 @@ export function bridge(): CodaraBridge {
     chatNew: async () => ({ ok: false, error: 'bridge unavailable' }),
     chatSwitch: async () => ({ ok: false, error: 'bridge unavailable' }),
     chatMainSession: async () => ({ sessionId: null }),
+    chatRunning: async () => ({ running: [] }),
     chatList: async () => ({ ok: false, sessions: [], error: 'bridge unavailable' }),
     chatRename: async () => false,
     chatDelete: async () => ({ ok: false, error: 'bridge unavailable' }),

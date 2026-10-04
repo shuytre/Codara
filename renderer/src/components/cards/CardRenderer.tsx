@@ -73,22 +73,39 @@ function PlanCardView(props: { card: import('@codara/contract').PlanCard }) {
   );
 }
 
+/**
+ * 工具调用卡（第 6 轮）：默认折叠为**一行摘要**。
+ *
+ * 此前直接把 paramsSummary（JSON.stringify 截断串）整块丢进 <pre>，
+ * 一屏几十行裸 JSON，真正的信息（调了哪个工具、关键参数是什么）被埋掉。
+ * 现在首行只显示 `search · pattern=*.ts · mode=files`，点击才展开完整参数与结果。
+ */
 function ToolCallCardView(props: { card: import('@codara/contract').ToolCallCard }) {
+  const [open, setOpen] = createSignal(false);
+  // 摘要行优先用主进程算好的 summaryLine；历史回灌的卡由渲染层算好补齐
+  const summary = () => props.card.summaryLine ?? props.card.tool;
+  const failed = () => props.card.ok === false;
   return (
-    <div class={`card card-tool ${props.card.ok ? '' : 'card-failed'}`}>
-      <div class="card-head">
-        <span class="card-tag mono">{props.card.tool}</span>
-        <span class="badge">{props.card.ok === undefined ? statusBadge(props.card.status) : props.card.ok ? '完成' : '失败'}</span>
+    <div class={`card card-tool ${failed() ? 'card-failed' : ''}`}>
+      <button class="tool-summary" onClick={() => setOpen(!open())} title={open() ? '收起' : '展开完整参数'}>
+        <span class={`tool-caret ${open() ? 'open' : ''}`}>▸</span>
+        <span class="tool-name mono">{props.card.tool}</span>
+        <span class="tool-args mono">{summary()}</span>
+        <Show when={props.card.status === 'running'}>
+          <span class="tool-state">执行中</span>
+        </Show>
         <Show when={props.card.cacheRef}>
           <span class="cache-ref">{props.card.cacheRef}</span>
         </Show>
-      </div>
-      <pre class="card-body mono small">{props.card.paramsSummary}</pre>
-      <Show when={props.card.result}>
-        <details>
-          <summary>结果</summary>
+        <span class={`tool-mark ${failed() ? 'bad' : 'ok'}`}>{failed() ? '✗' : '✓'}</span>
+      </button>
+      <Show when={open()}>
+        <div class="card-body mono small">参数</div>
+        <pre class="card-body mono small">{props.card.paramsSummary}</pre>
+        <Show when={props.card.result}>
+          <div class="card-body mono small">结果</div>
           <pre class="card-body mono small">{props.card.result}</pre>
-        </details>
+        </Show>
       </Show>
     </div>
   );
@@ -117,8 +134,13 @@ function ApprovalCardView(props: { card: import('@codara/contract').ApprovalCard
   const respond = async (approved: boolean) => {
     setBusy(true);
     try {
-      await b.approvalRespond({ approvalToken: props.card.approvalToken, approved });
-      // 三处卡片状态同步（cards.list / pendingApprovals / entries.cards），缺一会残留
+      // 必须带 sessionId：主进程的审批等待表按会话分桶（第 6 轮并行隔离）
+      await b.approvalRespond({
+        approvalToken: props.card.approvalToken,
+        approved,
+        sessionId: props.card.sessionId,
+      });
+      // 三处卡片状态同步（cards 分区 / pendingApprovals / entries.cards），缺一会残留
       resolveApprovalCard(props.card.approvalToken, approved);
     } finally {
       setBusy(false);

@@ -1,8 +1,24 @@
 // App 根组件：首次启动向导 / 主布局路由 + IPC 事件订阅
-import { createEffect, createResource, createSignal, onCleanup, Show } from 'solid-js';
+import { createEffect, createResource, onCleanup, Show } from 'solid-js';
 
 import { bridge } from './ipc/client';
-import { setCrew, settings, setSettings, setUi, appendEntry, setChat, attachCardToLive, appendDeltaToLive, finalizeLiveEntry, setApprovalCard, setUsage, setConvs } from './state/stores';
+import {
+  MAIN_KEY,
+  activeKey,
+  appendDeltaToLive,
+  appendEntry,
+  attachCardToLive,
+  finalizeLiveEntry,
+  setChat,
+  setConvs,
+  setCrew,
+  setSessionRunning,
+  setSettings,
+  setStreaming,
+  setUi,
+  setUsage,
+  setApprovalCard,
+} from './state/stores';
 import { MainLayout } from './components/layout/MainLayout';
 import { FirstRunWizard } from './components/wizard/FirstRunWizard';
 
@@ -21,6 +37,10 @@ export function App() {
   createEffect(() => {
     void (async () => {
       try {
+        // 主对话真实 id：主对话在左栏是固定项（activeId=null），但事件按真实 id 回来，
+        // 必须先存下来才能把主对话的流/卡片路由到正确分区。
+        const main = await b.chatMainSession();
+        if (main?.sessionId) setConvs('mainId', main.sessionId);
         const r = await b.chatList();
         if (!r?.ok) return;
         const items = r.sessions
@@ -38,16 +58,29 @@ export function App() {
   });
 
   // main → renderer 事件订阅：流式增量 / 卡片 / 完成 / 预算挂起
+  //
+  // 第 6 轮：**按 sessionId 路由**。此前所有事件都写进唯一的 live 条目，
+  // 于是两个会话同时跑时后到的事件会把前一个的内容顶掉 —— 用户看到的正是
+  // 「主任务突然转到你那个其他的会话，然后快速停止」。现在每个事件落到自己会话的分区。
   createEffect(() => {
+    // 事件未带 sessionId 时（异常/降级路径）回落到当前查看的会话，
+    // 保证至少不丢内容。
+    const keyOf = (sid: unknown): string =>
+      typeof sid === 'string' && sid.length > 0 ? sid : activeKey() || MAIN_KEY;
+
     const offChat = b.onChatEvent((payload) => {
-      const p = payload as { kind: string; text?: string; card?: never; usage?: never };
+      const p = payload as { kind: string; text?: string; card?: never; usage?: never; sessionId?: string };
+      const key = keyOf(p.sessionId);
       if (p.kind === 'delta' && p.text) {
-        appendDeltaToLive(p.text);
+        setStreaming(key, true);
+        setSessionRunning(key, true);
+        appendDeltaToLive(key, p.text);
       } else if (p.kind === 'card' && p.card) {
-        attachCardToLive(p.card);
+        attachCardToLive(key, p.card);
       } else if (p.kind === 'done') {
-        setChat({ streaming: false, streamText: '' });
-        finalizeLiveEntry(p.text || '');
+        setStreaming(key, false);
+        setSessionRunning(key, false);
+        finalizeLiveEntry(key, p.text || '');
       }
     });
     // 预算/轮次挂起收尾。
@@ -55,10 +88,13 @@ export function App() {
     // 于是「执行完就断」——中栏空白、输入框像是还能用但没有回应，用户以为程序崩了。
     // 现在补齐三件事：解除 streaming、收尾当前回复、插入一条可读的系统说明。
     const offBudget = b.onBudgetSuspended((payload) => {
-      setUsage(payload as never);
-      setChat({ streaming: false, streamText: '' });
-      finalizeLiveEntry();
-      appendEntry({
+      const snap = payload as { sessionId?: string } & Record<string, unknown>;
+      const key = keyOf(snap.sessionId);
+      setUsage(snap as never);
+      setStreaming(key, false);
+      setSessionRunning(key, false);
+      finalizeLiveEntry(key);
+      appendEntry(key, {
         id: `sys-budget-${Date.now()}`,
         role: 'system',
         text: '已达本轮轮次/预算上限，任务在此暂停（进度已保存）。直接继续发送消息即可接着跑。',
@@ -68,8 +104,10 @@ export function App() {
     // 审批卡（规格 6.1）：write/terminal/git 写操作需人工批准；
     // 必须渲染到对话流，否则 gateway.check() 永久挂起、工具卡停在「执行中」
     const offApproval = b.onApprovalRequest((payload) => {
-      attachCardToLive(payload.card);
-      setApprovalCard(payload.card);
+      const key = keyOf(payload.sessionId);
+      const card = { ...payload.card, sessionId: payload.card.sessionId ?? key };
+      attachCardToLive(key, card);
+      setApprovalCard(card);
     });
     // M3：专家团事件 → 左栏角色树
     const offInst = b.onCrewInstance((payload) => {

@@ -3,31 +3,28 @@
 // 工作区入口已移至 Composer 底部工具行（ws-chip）
 import { createSignal, For, Show } from 'solid-js';
 
+import type { Card, ChatEntry } from '@codara/contract';
+import type { ChatHistoryMessage, ChatHistoryToolCall } from '@codara/contract';
 import { bridge } from '../../ipc/client';
 import {
+  MAIN_KEY,
   addConversation,
   appendEntry,
-  cards,
-  chat,
+  clearSession,
   convs,
-  crew,
+  isSessionRunning,
   removeConversation,
   setActiveConversation,
-  setCards,
-  setChat,
+  setConvs,
   setUi,
+  upsertCard,
 } from '../../state/stores';
 
 export function LeftPane(props: { onOpenSettings: () => void }) {
   const b = bridge();
   const [switching, setSwitching] = createSignal(false);
 
-  const clearStream = () => {
-    setChat({ entries: [], liveId: null, streaming: false, streamText: '' });
-    setCards('list', []);
-  };
-
-  // 新建对话：主进程建新会话并重置 AgentLoop，渲染层清空聊天流并入列表（用主进程返回的真实 sessionId）
+  // 新建对话：主进程建新会话，渲染层只清**新会话**的分区并入列表。
   // 以当前输入框里的首行文字作为标题：左栏才可辨识（否则全是「新对话 18:49」）。
   const newChat = async (title?: string) => {
     if (switching()) return;
@@ -35,9 +32,10 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
     try {
       const r = await b.chatNew(title ? { title } : undefined);
       if (!r?.ok) throw new Error(r?.error || '新建对话失败');
-      clearStream();
+      const sid = r.sessionId || `c-${Date.now()}`;
+      clearSession(sid);
       addConversation({
-        sessionId: r.sessionId || `c-${Date.now()}`,
+        sessionId: sid,
         title: title?.trim().slice(0, 24) || `新对话 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
         createdAt: Date.now(),
       });
@@ -49,16 +47,19 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
   };
 
   // 切换会话：主进程恢复历史消息（上下文与聊天流同步重建）
-  const switchTo = async (sessionId: string) => {
-    if (switching() || convs.activeId === sessionId) return;
+  //
+  // 第 6 轮：**只清目标会话的分区**。此前 clearStream() 清的是唯一的全局流 ——
+  // 切会话等于把另一个正在跑的任务的现场从 UI 上抹掉，用户切回去只剩半截。
+  // 现在每个会话各有一份分区，切走再切回内容完整。
+  const switchTo = async (sessionId: string, asMain = false) => {
+    if (switching()) return;
     setSwitching(true);
     try {
       const r = await b.chatSwitch({ sessionId });
       if (!r?.ok) throw new Error(r?.error || '切换失败');
-      clearStream();
-      // 把主进程回传的历史重建到中栏：否则切换会话后中栏一片空白，用户以为历史丢失
-      renderHistory(sessionId, (r.messages ?? []) as never[]);
-      setActiveConversation(sessionId);
+      clearSession(sessionId);
+      renderHistory(sessionId, r.messages ?? []);
+      setActiveConversation(asMain ? null : sessionId);
     } catch (err) {
       setUi({ toast: `切换会话失败：${err instanceof Error ? err.message : String(err)}` });
     } finally {
@@ -66,8 +67,7 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
     }
   };
 
-  // 删除会话：二次确认 → 主进程删 sidecar 行 → 本地列表移除。
-  // 删的是当前会话时，主进程已把 AgentLoop 回退到主对话，渲染层同步清空中栏并回主对话。
+  // 删除会话：二次确认 → 主进程删 sidecar 行 → 本地分区与列表一并移除。
   // ⚠️ 必须定义在 return 之前：Solid 会把 return 编译成立即执行箭头，事件处理器在渲染期
   //    就被挂载；若此处用 const 且声明在 return 之后，点击时求值会命中 TDZ
   //    （ReferenceError: Cannot access 'deleteConversation' before initialization），
@@ -82,11 +82,11 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
       const r = await b.chatDelete({ sessionId });
       if (!r?.ok) throw new Error(r?.error || '删除失败');
       const wasActive = convs.activeId === sessionId;
+      // 分区随会话一起丢弃（removeConversation 内部处理）
       removeConversation(sessionId);
       if (wasActive) {
-        clearStream();
         setActiveConversation(null); // 回主对话
-        // 回主对话必须重建中栏历史，否则只剩空白欢迎页（见 switchToMainAsync）
+        // 回主对话必须重建中栏历史，否则只剩空白欢迎页
         await loadHistoryToCenter();
       }
     } catch (err) {
@@ -96,19 +96,48 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
     }
   };
 
-  // 把主进程回传的历史消息重建到中栏。
-  // 抽成公共函数：switchTo 与 switchToMainAsync 必须共享同一套重建逻辑，
+  // 把主进程回传的历史消息重建到**指定会话**的分区。
+  // 抽成公共函数：switchTo / 切回主对话必须共享同一套重建逻辑，
   // 否则「切回主对话」这条路径会漏掉重建（清空后一片空白，用户以为历史丢失）。
-  // 工具调用行（content=null 的 assistant）与 role='tool' 行在此一并还原为可读条目，
-  // 不再被 content 非空过滤误杀。
-  const renderHistory = (sessionId: string, history: Array<{ role: string; content: string | null; toolName?: string }>) => {
-    for (const [i, m] of history.entries()) {
+  //
+  // 第 6 轮：工具调用不再降级成 system 文本，而是生成与实时运行**同构**的
+  // ToolCallCard 并回灌 cards 分区。此前历史只出文本，右栏「工具流水」只认
+  // type==='tool-call' 的卡 —— 于是切回历史会话时右栏恒为「暂无工具调用」。
+  const renderHistory = (sessionId: string, history: ChatHistoryMessage[]) => {
+    let n = 0;
+    for (const m of history) {
       const role = m.role === 'user' ? 'user' : m.role === 'system' ? 'system' : m.role === 'tool' ? 'system' : 'assistant';
+      const idx = n++;
+      // 结构化工具调用行：出卡而不是文本。
+      // assistant 行若同时带正文（工具调用前的说明），正文在真实时间上先于工具卡，
+      // 因此先补文本条目再补卡片条目。
+      if (m.toolCalls && m.toolCalls.length > 0) {
+        if (m.content) {
+          appendEntry(sessionId, {
+            id: `h-${sessionId}-${idx}-t`,
+            role: 'assistant',
+            text: m.content,
+            createdAt: Date.now(),
+          });
+        }
+        const cards: Card[] = m.toolCalls.map((tc: ChatHistoryToolCall, i: number) =>
+          historyToolCard(sessionId, tc, `h-${sessionId}-${idx}-${i}`),
+        );
+        for (const c of cards) upsertCard(sessionId, c);
+        appendEntry(sessionId, {
+          id: `h-${sessionId}-${idx}`,
+          role: 'event',
+          text: '',
+          createdAt: Date.now(),
+          cards,
+        });
+        continue;
+      }
       // 工具结果行没有自然语言正文，用「工具返回」前缀 + 原文呈现，避免中栏出现无名 JSON
       const text = m.content ?? (m.toolName ? `调用工具 ${m.toolName}…` : '（工具调用）');
-      appendEntry({
-        id: `h-${sessionId}-${i}`,
-        role: role as never,
+      appendEntry(sessionId, {
+        id: `h-${sessionId}-${idx}`,
+        role: role as ChatEntry['role'],
         text: role === 'system' && m.role === 'tool' ? `工具返回：${text}` : text,
         createdAt: Date.now(),
       });
@@ -120,17 +149,16 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
     try {
       const main = await b.chatMainSession();
       if (!main?.sessionId) return;
-      const r = await b.chatSwitch({ sessionId: main.sessionId });
-      if (!r?.ok) return;
-      clearStream();
-      renderHistory(main.sessionId, (r.messages ?? []) as never[]);
+      await switchTo(main.sessionId, true);
     } catch {
       // 拉取失败保持空白即可，用户仍可继续发消息
     }
   };
 
-  const MAIN: string = '__main__';
+  const MAIN: string = MAIN_KEY;
   const isActive = (id: string) => (convs.activeId === null ? id === MAIN : convs.activeId === id);
+  // 主对话的运行态要看真实 sessionId（事件按它回来）
+  const isRunning = (id: string) => (id === MAIN ? isSessionRunning(convs.mainId ?? '') : isSessionRunning(id));
 
   // 分组：今天 / 更早（豆包/Codex 分组逻辑）
   const startOfToday = new Date().setHours(0, 0, 0, 0);
@@ -151,46 +179,17 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
           onClick={() => (convs.activeId === null ? undefined : switchToMain())}
         >
           <span class="conv-name">主对话</span>
+          <Show when={isRunning(MAIN)}>
+            <span class="conv-running" title="该会话正在跑任务" />
+          </Show>
         </div>
         <Show when={todayConvs().length > 0}>
           <div class="conv-group">今天</div>
-          <For each={todayConvs()}>
-            {(c) => (
-              <div class={`conv-item ${isActive(c.sessionId) ? 'active' : ''}`} onClick={() => switchTo(c.sessionId)}>
-                <span class="conv-name">{c.title}</span>
-                <button
-                  class="conv-del"
-                  title="删除会话"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void deleteConversation(c.sessionId, c.title);
-                  }}
-                >
-                  <IconTrash />
-                </button>
-              </div>
-            )}
-          </For>
+          <For each={todayConvs()}>{(c) => <ConvRow conv={c} active={isActive(c.sessionId)} running={isRunning(c.sessionId)} onSwitch={() => switchTo(c.sessionId)} onDelete={() => deleteConversation(c.sessionId, c.title)} />}</For>
         </Show>
         <Show when={earlierConvs().length > 0}>
           <div class="conv-group">更早</div>
-          <For each={earlierConvs()}>
-            {(c) => (
-              <div class={`conv-item ${isActive(c.sessionId) ? 'active' : ''}`} onClick={() => switchTo(c.sessionId)}>
-                <span class="conv-name">{c.title}</span>
-                <button
-                  class="conv-del"
-                  title="删除会话"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void deleteConversation(c.sessionId, c.title);
-                  }}
-                >
-                  <IconTrash />
-                </button>
-              </div>
-            )}
-          </For>
+          <For each={earlierConvs()}>{(c) => <ConvRow conv={c} active={isActive(c.sessionId)} running={isRunning(c.sessionId)} onSwitch={() => switchTo(c.sessionId)} onDelete={() => deleteConversation(c.sessionId, c.title)} />}</For>
         </Show>
       </div>
 
@@ -216,17 +215,96 @@ export function LeftPane(props: { onOpenSettings: () => void }) {
     try {
       const main = await b.chatMainSession();
       if (!main?.sessionId) throw new Error('主对话会话不可用');
-      const r = await b.chatSwitch({ sessionId: main.sessionId });
-      if (!r?.ok) throw new Error(r?.error || '切换失败');
-      clearStream();
-      renderHistory(main.sessionId, (r.messages ?? []) as never[]);
-      setActiveConversation(null); // null = 主对话
+      if (main.sessionId !== convs.mainId) setConvs('mainId', main.sessionId);
+      await switchTo(main.sessionId, true);
     } catch (err) {
       setUi({ toast: `切回主对话失败：${err instanceof Error ? err.message : String(err)}` });
     } finally {
       setSwitching(false);
     }
   }
+}
+
+/** 左栏单个会话行：标题 + 运行中圆点 + 删除按钮 */
+function ConvRow(props: {
+  conv: { sessionId: string; title: string };
+  active: boolean;
+  running: boolean;
+  onSwitch: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div class={`conv-item ${props.active ? 'active' : ''}`} onClick={props.onSwitch}>
+      <span class="conv-name">{props.conv.title}</span>
+      <Show when={props.running}>
+        <span class="conv-running" title="该会话正在跑任务" />
+      </Show>
+      <button
+        class="conv-del"
+        title="删除会话"
+        onClick={(e) => {
+          e.stopPropagation();
+          props.onDelete();
+        }}
+      >
+        <IconTrash />
+      </button>
+    </div>
+  );
+}
+
+/** 历史工具调用 → ToolCallCard（与 agentLoop 实时生成的卡同构） */
+function historyToolCard(sessionId: string, tc: ChatHistoryToolCall, id: string): Card {
+  return {
+    id,
+    type: 'tool-call',
+    status: tc.ok ? 'done' : 'failed',
+    createdAt: Date.now(),
+    sessionId,
+    tool: tc.name,
+    paramsSummary: tc.args,
+    summaryLine: buildSummaryLine(tc.name, tc.args),
+    result: tc.result,
+    ok: tc.ok,
+  } as Card;
+}
+
+/**
+ * 生成 `search · pattern=*.ts · mode=files` 形式的一行摘要。
+ * 与主进程 toolSummaryLine 同算法（渲染层历史回灌与实时卡片要一致）。
+ */
+export function buildSummaryLine(tool: string, argsText: string): string {
+  let params: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(argsText) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      params = parsed as Record<string, unknown>;
+    } else {
+      params = { value: parsed };
+    }
+  } catch {
+    params = {};
+  }
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue;
+    if (typeof v === 'string') {
+      parts.push(`${k}=${v.length > 40 ? v.slice(0, 40) + '…' : v}`);
+    } else if (typeof v === 'number' || typeof v === 'boolean') {
+      parts.push(`${k}=${String(v)}`);
+    } else if (Array.isArray(v)) {
+      parts.push(`${k}=[${v.length}]`);
+    } else {
+      // 对象型参数（write 的 edits 等）：只给键数，避免一行摘要又变成裸 JSON
+      try {
+        parts.push(`${k}={${Object.keys(v as object).length} keys}`);
+      } catch {
+        parts.push(`${k}=…`);
+      }
+    }
+    if (parts.length >= 3) break;
+  }
+  return parts.length > 0 ? `${tool} · ${parts.join(' · ')}` : tool;
 }
 
 /** lucide: plus */
