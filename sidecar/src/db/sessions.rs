@@ -3,40 +3,59 @@
 //! 跨角色读历史在 sidecar 层 100% 拒绝（7002 + isolation violation）。
 use rusqlite::Connection;
 use serde_json::{json, Value};
-
 use super::now_ms;
 use crate::rpc::envelope::Envelope;
 use crate::rpc::error;
 use crate::state::AppState;
 
-fn open_conn(state: &AppState) -> Result<Connection, String> {
-    let db_dir = state.app_data_dir().join("db");
-    let _ = std::fs::create_dir_all(&db_dir);
-    let conn = Connection::open(db_dir.join("codara.db")).map_err(|e| e.to_string())?;
-    // 防御性建表：schema 权威来源是 db.migrate；此处仅保证独立调用不因缺表崩溃
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            role TEXT,
-            task_id TEXT,
-            title TEXT,
-            created_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT,
-            tool_calls TEXT,
-            tool_call_id TEXT,
-            usage_prompt INTEGER DEFAULT 0,
-            usage_completion INTEGER DEFAULT 0,
-            created_at INTEGER NOT NULL
-        );",
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(conn)
+/// 获取数据库连接：**复用** `AppState.db` 中的长连接。
+///
+/// 此前每次调用都 `Connection::open` 新建连接，并顺带执行一遍 `CREATE TABLE IF NOT EXISTS`：
+/// 高频 `msg.append`（流式每个消息一次）下反复 open/close 连接、反复解析建表 SQL，
+/// 且 `state.db` 只在 `db.migrate` 时写入、从不被读取（连接池成了摆设）。
+///
+/// 现在统一走 `state.db`：已 migrate 则直接复用；未 migrate（独立调用场景）才懒建一次
+/// 并缓存回 `state.db`，同时仅在该次建表（后续复用不再重复执行 DDL）。
+fn with_conn<T>(
+    state: &AppState,
+    f: impl FnOnce(&Connection) -> Result<T, Envelope>,
+) -> Result<T, Envelope> {
+    let mut guard = state.db.lock().unwrap();
+    if guard.is_none() {
+        let db_dir = state.app_data_dir().join("db");
+        let _ = std::fs::create_dir_all(&db_dir);
+        let conn = Connection::open(db_dir.join("codara.db"))
+            .map_err(|e| Envelope::err(error::DB_ERROR, e.to_string()))?;
+        // 与 db.migrate 保持一致的 pragma（WAL + NORMAL）
+        conn.pragma_update(None, "journal_mode", "WAL").ok();
+        conn.pragma_update(None, "synchronous", "NORMAL").ok();
+        // 防御性建表：schema 权威来源是 db.migrate；此处仅保证独立调用不因缺表崩溃
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                role TEXT,
+                task_id TEXT,
+                title TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_calls TEXT,
+                tool_call_id TEXT,
+                usage_prompt INTEGER DEFAULT 0,
+                usage_completion INTEGER DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );",
+        )
+        .map_err(|e| Envelope::err(error::DB_ERROR, e.to_string()))?;
+        *guard = Some(crate::db::Database { conn });
+    }
+    let db = guard.as_ref().ok_or_else(|| Envelope::err(error::DB_ERROR, "db unavailable"))?;
+    f(&db.conn)
 }
 
 fn gen_id(prefix: &str) -> String {
@@ -96,17 +115,16 @@ pub fn session_create(state: &AppState, params: Value) -> Envelope {
         return Envelope::err(error::INVALID_PARAMS, "crew session requires role");
     }
     let id = gen_id("sess");
-    let conn = match open_conn(state) {
-        Ok(c) => c,
-        Err(e) => return Envelope::err(error::DB_ERROR, e),
-    };
-    match conn.execute(
-        "INSERT INTO sessions (id, kind, role, task_id, title, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![id, kind, role, task_id, title, now_ms()],
-    ) {
-        Ok(_) => Envelope::ok(json!({ "sessionId": id, "kind": kind, "role": role })),
-        Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
-    }
+    with_conn(state, |conn| {
+        match conn.execute(
+            "INSERT INTO sessions (id, kind, role, task_id, title, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, kind, role, task_id, title, now_ms()],
+        ) {
+            Ok(_) => Ok(Envelope::ok(json!({ "sessionId": id, "kind": kind, "role": role }))),
+            Err(e) => Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        }
+    })
+    .unwrap_or_else(|e| e)
 }
 
 /// 重命名会话标题（首条用户消息回填，左栏可辨识）。
@@ -120,18 +138,17 @@ pub fn session_rename(state: &AppState, params: Value) -> Envelope {
         Some(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => return Envelope::err(error::INVALID_PARAMS, "title is required"),
     };
-    let conn = match open_conn(state) {
-        Ok(c) => c,
-        Err(e) => return Envelope::err(error::DB_ERROR, e),
-    };
-    match conn.execute(
-        "UPDATE sessions SET title = ?1 WHERE id = ?2",
-        rusqlite::params![title, session_id],
-    ) {
-        Ok(n) if n > 0 => Envelope::ok(json!({ "renamed": true })),
-        Ok(_) => Envelope::err(error::DB_ERROR, "session not found"),
-        Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
-    }
+    with_conn(state, |conn| {
+        match conn.execute(
+            "UPDATE sessions SET title = ?1 WHERE id = ?2",
+            rusqlite::params![title, session_id],
+        ) {
+            Ok(n) if n > 0 => Ok(Envelope::ok(json!({ "renamed": true }))),
+            Ok(_) => Ok(Envelope::err(error::DB_ERROR, "session not found")),
+            Err(e) => Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        }
+    })
+    .unwrap_or_else(|e| e)
 }
 
 /// 删除会话（左栏右键/悬停删除入口）。
@@ -143,29 +160,30 @@ pub fn session_delete(state: &AppState, params: Value) -> Envelope {
         Some(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => return Envelope::err(error::INVALID_PARAMS, "sessionId is required"),
     };
-    let mut conn = match open_conn(state) {
-        Ok(c) => c,
-        Err(e) => return Envelope::err(error::DB_ERROR, e),
-    };
-    let tx = match conn.transaction() {
-        Ok(t) => t,
-        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
-    };
-    // 先删消息，再删会话；任一步失败整体回滚
-    if let Err(e) = tx.execute("DELETE FROM messages WHERE session_id = ?1", rusqlite::params![session_id]) {
-        return Envelope::err(error::DB_ERROR, e.to_string());
-    }
-    let removed = match tx.execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![session_id]) {
-        Ok(n) => n,
-        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
-    };
-    if removed == 0 {
-        return Envelope::err(error::DB_ERROR, "session not found");
-    }
-    if let Err(e) = tx.commit() {
-        return Envelope::err(error::DB_ERROR, e.to_string());
-    }
-    Envelope::ok(json!({ "deleted": removed }))
+    with_conn(state, |conn| {
+        // 事务需要 &mut Connection：with_conn 给的是 &Connection，这里用 unchecked_transaction
+        // 语义等价（单进程内 & 唯一的 AppState 保证不会并发进入本函数）。
+        let tx = match conn.unchecked_transaction() {
+            Ok(t) => t,
+            Err(e) => return Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        };
+        // 先删消息，再删会话；任一步失败整体回滚
+        if let Err(e) = tx.execute("DELETE FROM messages WHERE session_id = ?1", rusqlite::params![session_id]) {
+            return Ok(Envelope::err(error::DB_ERROR, e.to_string()));
+        }
+        let removed = match tx.execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![session_id]) {
+            Ok(n) => n,
+            Err(e) => return Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        };
+        if removed == 0 {
+            return Ok(Envelope::err(error::DB_ERROR, "session not found"));
+        }
+        if let Err(e) = tx.commit() {
+            return Ok(Envelope::err(error::DB_ERROR, e.to_string()));
+        }
+        Ok(Envelope::ok(json!({ "deleted": removed })))
+    })
+    .unwrap_or_else(|e| e)
 }
 
 pub fn msg_append(state: &AppState, params: Value) -> Envelope {
@@ -181,6 +199,21 @@ pub fn msg_append(state: &AppState, params: Value) -> Envelope {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "role (user|assistant|tool|system) is required"),
     };
+    // 枚举校验：role 是 messages 表的语义字段，写入未知值会污染历史回放
+    // （例如自定义 role 会让 OpenAI 兼容接口 400，或让工具消息过滤规则失配）。
+    // 此前仅依赖调用方自律，现于 sidecar 入口硬校验。
+    if !matches!(role.as_str(), "user" | "assistant" | "tool" | "system") {
+        return Envelope::err(
+            error::INVALID_PARAMS,
+            format!("invalid role `{}`; expected user|assistant|tool|system", role),
+        );
+    }
+    // tool 角色必须携带 toolCallId：缺了就是孤立工具消息，回放时无法与 assistant
+    // 的 tool_calls 配对，会被上层过滤规则清理掉，等于静默丢一条历史。
+    let tool_call_id = params.get("toolCallId").and_then(|v| v.as_str()).map(String::from);
+    if role == "tool" && tool_call_id.is_none() {
+        return Envelope::err(error::INVALID_PARAMS, "role=tool requires toolCallId");
+    }
     // 字符串参数必须用 as_str() 取原文。此前用 Value::to_string() 是序列化语义：
     // 传入的字符串会被再包一层引号并转义（双重编码），导致 msg.list 恢复历史时
     // tool_calls 解析不出数组 → assistant 工具行被过滤 → 孤立 tool 消息 →
@@ -193,25 +226,23 @@ pub fn msg_append(state: &AppState, params: Value) -> Envelope {
         .get("toolCalls")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let tool_call_id = params.get("toolCallId").and_then(|v| v.as_str()).map(String::from);
     let up = params.get("usagePrompt").and_then(|v| v.as_i64()).unwrap_or(0);
     let uc = params.get("usageCompletion").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let conn = match open_conn(state) {
-        Ok(c) => c,
-        Err(e) => return Envelope::err(error::DB_ERROR, e),
-    };
-    if let Err(e) = assert_role(&conn, &session_id, &role_id) {
-        return e;
-    }
-    match conn.execute(
-        "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, usage_prompt, usage_completion, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![session_id, role, content, tool_calls, tool_call_id, up, uc, now_ms()],
-    ) {
-        Ok(_) => Envelope::ok(json!({ "appended": true })),
-        Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
-    }
+    with_conn(state, |conn| {
+        if let Err(e) = assert_role(conn, &session_id, &role_id) {
+            return Ok(e);
+        }
+        match conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, usage_prompt, usage_completion, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![session_id, role, content, tool_calls, tool_call_id, up, uc, now_ms()],
+        ) {
+            Ok(_) => Ok(Envelope::ok(json!({ "appended": true }))),
+            Err(e) => Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        }
+    })
+    .unwrap_or_else(|e| e)
 }
 
 /// 列出会话（左栏对话列表的数据源）。
@@ -230,33 +261,33 @@ pub fn session_list(state: &AppState, params: Value) -> Envelope {
     let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("main").to_string();
     let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).max(1).min(500);
 
-    let conn = match open_conn(state) {
-        Ok(c) => c,
-        Err(e) => return Envelope::err(error::DB_ERROR, e),
-    };
-    let mut stmt = match conn.prepare(
-        "SELECT id, title, created_at FROM sessions WHERE kind = ?1 ORDER BY created_at DESC LIMIT ?2",
-    ) {
-        Ok(s) => s,
-        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
-    };
-    let rows = stmt.query_map(rusqlite::params![kind, limit], |r| {
-        Ok(json!({
-            "sessionId": r.get::<_, String>(0)?,
-            "title": r.get::<_, Option<String>>(1)?,
-            "createdAt": r.get::<_, i64>(2)?,
-        }))
-    });
-    match rows {
-        Ok(iter) => {
-            let items: Vec<Value> = iter.filter_map(|x| x.ok()).collect();
-            Envelope::ok(json!({ "sessions": items }))
+    with_conn(state, |conn| {
+        let mut stmt = match conn.prepare(
+            "SELECT id, title, created_at FROM sessions WHERE kind = ?1 ORDER BY created_at DESC LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(e) => return Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        };
+        let rows = stmt.query_map(rusqlite::params![kind, limit], |r| {
+            Ok(json!({
+                "sessionId": r.get::<_, String>(0)?,
+                "title": r.get::<_, Option<String>>(1)?,
+                "createdAt": r.get::<_, i64>(2)?,
+            }))
+        });
+        match rows {
+            Ok(iter) => {
+                let items: Vec<Value> = iter.filter_map(|x| x.ok()).collect();
+                Ok(Envelope::ok(json!({ "sessions": items })))
+            }
+            Err(e) => Ok(Envelope::err(error::DB_ERROR, e.to_string())),
         }
-        Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
-    }
+    })
+    .unwrap_or_else(|e| e)
 }
 
-pub fn msg_list(state: &AppState, params: Value) -> Envelope {    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+pub fn msg_list(state: &AppState, params: Value) -> Envelope {
+    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "sessionId is required"),
     };
@@ -266,37 +297,36 @@ pub fn msg_list(state: &AppState, params: Value) -> Envelope {    let session_id
     };
     let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(200).max(1).min(2000);
 
-    let conn = match open_conn(state) {
-        Ok(c) => c,
-        Err(e) => return Envelope::err(error::DB_ERROR, e),
-    };
-    if let Err(e) = assert_role(&conn, &session_id, &role_id) {
-        return e;
-    }
-    let mut stmt = match conn.prepare(
-        "SELECT id, role, content, tool_calls, tool_call_id, usage_prompt, usage_completion, created_at
-         FROM messages WHERE session_id = ?1 ORDER BY id ASC LIMIT ?2",
-    ) {
-        Ok(s) => s,
-        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
-    };
-    let rows = stmt.query_map(rusqlite::params![session_id, limit], |r| {
-        Ok(json!({
-            "id": r.get::<_, i64>(0)?,
-            "role": r.get::<_, String>(1)?,
-            "content": r.get::<_, Option<String>>(2)?,
-            "toolCalls": r.get::<_, Option<String>>(3)?,
-            "toolCallId": r.get::<_, Option<String>>(4)?,
-            "usagePrompt": r.get::<_, i64>(5)?,
-            "usageCompletion": r.get::<_, i64>(6)?,
-            "createdAt": r.get::<_, i64>(7)?,
-        }))
-    });
-    match rows {
-        Ok(iter) => {
-            let items: Vec<Value> = iter.filter_map(|x| x.ok()).collect();
-            Envelope::ok(json!({ "messages": items }))
+    with_conn(state, |conn| {
+        if let Err(e) = assert_role(conn, &session_id, &role_id) {
+            return Ok(e);
         }
-        Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
-    }
+        let mut stmt = match conn.prepare(
+            "SELECT id, role, content, tool_calls, tool_call_id, usage_prompt, usage_completion, created_at
+             FROM messages WHERE session_id = ?1 ORDER BY id ASC LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(e) => return Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        };
+        let rows = stmt.query_map(rusqlite::params![session_id, limit], |r| {
+            Ok(json!({
+                "id": r.get::<_, i64>(0)?,
+                "role": r.get::<_, String>(1)?,
+                "content": r.get::<_, Option<String>>(2)?,
+                "toolCalls": r.get::<_, Option<String>>(3)?,
+                "toolCallId": r.get::<_, Option<String>>(4)?,
+                "usagePrompt": r.get::<_, i64>(5)?,
+                "usageCompletion": r.get::<_, i64>(6)?,
+                "createdAt": r.get::<_, i64>(7)?,
+            }))
+        });
+        match rows {
+            Ok(iter) => {
+                let items: Vec<Value> = iter.filter_map(|x| x.ok()).collect();
+                Ok(Envelope::ok(json!({ "messages": items })))
+            }
+            Err(e) => Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        }
+    })
+    .unwrap_or_else(|e| e)
 }

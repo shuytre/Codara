@@ -48,15 +48,26 @@ pub fn write_audit(app_data: &std::path::Path, event: &Value) -> bool {
     false
 }
 
-/// 脱敏：任何 key/value 中疑似凭据字段替换为 ***
+/// 脱敏：键名命中凭据字段替换为 ***；键名未命中时再对**字符串值**做模式匹配，
+/// 兜住「凭据出现在值里」的场景 —— 例如模型把密钥写进命令行参数
+/// （`--token=sk-xxx`、`api_key="..."`、`Authorization: Bearer xxx`），
+/// 或 curl 的 `-H "Authorization: Bearer ..."`。仅按键名脱敏会把这些漏进日志。
 pub fn redact(v: &mut Value) {
     match v {
         Value::Object(map) => {
             for (k, val) in map.iter_mut() {
                 let lower = k.to_lowercase();
-                if lower.contains("key") || lower.contains("token") || lower.contains("secret") || lower.contains("password") {
+                if lower.contains("key")
+                    || lower.contains("token")
+                    || lower.contains("secret")
+                    || lower.contains("password")
+                    || lower.contains("passwd")
+                    || lower.contains("credential")
+                    || lower.contains("authorization")
+                {
                     *val = Value::String("***".into());
                 } else {
+                    // 键名不像凭据：继续递归，字符串值会走 mask_credentials_in_text
                     redact(val);
                 }
             }
@@ -66,8 +77,74 @@ pub fn redact(v: &mut Value) {
                 redact(i);
             }
         }
+        Value::String(s) => {
+            if let Some(masked) = mask_credentials_in_text(s) {
+                *s = masked;
+            }
+        }
         _ => {}
     }
+}
+
+/// 在自由文本中屏蔽常见凭据形态。返回 None 表示无需改动（避免无谓分配）。
+///
+/// 覆盖两类写法：
+///  1. `key<分隔符>value`：`--token=xx`、`api_key: xx`、`password = xx`；
+///  2. `前缀 value`：`Bearer xx`、`Basic xx`，以及裸前缀 `sk-` / `ghp_` / `AKIA` 等。
+fn mask_credentials_in_text(s: &str) -> Option<String> {
+    let lower = s.to_ascii_lowercase();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0usize;
+    let mut changed = false;
+
+    // 全部按小写比对（lower 与 s 逐字节同长，索引通用）
+    const NEEDLES: [&str; 20] = [
+        "--token", "--api-key", "--apikey", "--password", "--auth",
+        "access_token", "refresh_token", "client_secret",
+        "api_key", "api-key", "apikey", "password", "passwd",
+        "authorization", "bearer", "basic",
+        "sk-", "ghp_", "ghu_", "xoxb-",
+    ];
+
+    for key in NEEDLES.iter() {
+        let mut from = 0usize;
+        while let Some(pos) = lower[from..].find(key) {
+            let abs = from + pos;
+            // 值起点：跳过 key 之后的分隔符（= : 空格 引号）
+            let mut i = abs + key.len();
+            while i < bytes.len() {
+                let c = bytes[i] as char;
+                if c == '=' || c == ':' || c == ' ' || c == '"' || c == '\'' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            // 值终点：遇到空白 / 引号 / 分隔符 / 行尾
+            let mut j = i;
+            while j < bytes.len() {
+                let c = bytes[j] as char;
+                if c.is_whitespace() || c == '"' || c == '\'' || c == ';' || c == '&' || c == ')' {
+                    break;
+                }
+                j += 1;
+            }
+            if j > i && i >= last {
+                out.push_str(&s[last..i]);
+                out.push_str("***");
+                last = j;
+                changed = true;
+            }
+            from = abs + key.len();
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+    out.push_str(&s[last..]);
+    Some(out)
 }
 
 pub fn audit_note(state: &AppState, params: Value) -> Envelope {
@@ -117,5 +194,73 @@ fn enforce_disk_limit(dir: &std::path::Path) {
         }
         let _ = std::fs::remove_file(&path);
         remaining -= size;
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 审计日志按天轮转的日期换算必须有测试锁定：
+    /// 曾经的 `-` 写法会让 1/2 月整体少 2 年（epoch day 0 → 1968-01-01），
+    /// 跨年轮转与按天检索会全部错位。
+    #[test]
+    fn day_string_epoch_zero_is_1970_01_01() {
+        assert_eq!(day_string(0), "19700101");
+    }
+
+    #[test]
+    fn day_string_handles_jan_feb_year_rollback() {
+        // 2024-01-01 00:00:00 UTC → 19723 天
+        assert_eq!(day_string(19723 * DAY_MS), "20240101");
+        // 2024-02-29（闰日）→ 19782 天
+        assert_eq!(day_string(19782 * DAY_MS), "20240229");
+        // 2023-12-31 → 19722 天（跨年边界：1 月必须归到下一年，不能被减成 2021）
+        assert_eq!(day_string(19722 * DAY_MS), "20231231");
+    }
+
+    #[test]
+    fn day_string_is_stable_within_a_day() {
+        let base = 19723 * DAY_MS;
+        assert_eq!(day_string(base), day_string(base + DAY_MS - 1));
+    }
+
+    /// L4 回归守卫：凭据出现在**值**里也要脱敏（旧实现只看键名，会漏）。
+    #[test]
+    fn redact_masks_keyed_fields() {
+        let mut v = json!({ "apiKey": "sk-abc", "auth_token": "t", "note": "keep" });
+        redact(&mut v);
+        assert_eq!(v["apiKey"], json!("***"));
+        assert_eq!(v["auth_token"], json!("***"));
+        assert_eq!(v["note"], json!("keep"));
+    }
+
+    #[test]
+    fn redact_masks_credentials_embedded_in_values() {
+        let mut v = json!({
+            "event": "terminal.exec",
+            "command": "curl -H \"Authorization: Bearer sk-live-123456\" https://x"
+        });
+        redact(&mut v);
+        let cmd = v["command"].as_str().unwrap();
+        assert!(!cmd.contains("sk-live-123456"), "bearer 值未脱敏: {cmd}");
+        assert!(cmd.contains("***"));
+        // 命令其余部分保持可读，便于审计追责
+        assert!(cmd.contains("curl"));
+    }
+
+    #[test]
+    fn redact_masks_cli_flag_values() {
+        let mut v = json!({ "argv": ["deploy", "--token=ghp_abcdef123456", "--region", "cn"] });
+        redact(&mut v);
+        let joined = v["argv"].to_string();
+        assert!(!joined.contains("ghp_abcdef123456"), "CLI 凭据未脱敏: {joined}");
+        assert!(joined.contains("cn"), "非凭据参数不该被吞掉");
+    }
+
+    #[test]
+    fn redact_leaves_plain_text_untouched() {
+        let mut v = json!({ "msg": "build finished in 12s" });
+        redact(&mut v);
+        assert_eq!(v["msg"], json!("build finished in 12s"));
     }
 }

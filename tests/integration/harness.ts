@@ -58,11 +58,16 @@ export class SidecarHarness {
         ];
     const bin = candidates.find((p) => fs.existsSync(p));
     if (!bin) throw new Error(`sidecar binary not found; run cargo build first (looked: ${candidates.join(', ')})`);
-    const stamp = fs.statSync(bin).mtime.toISOString();
-    // eslint-disable-next-line no-console
-    console.log(`[harness] sidecar binary: ${bin} (built ${stamp})`);
+    // 每个用例都起一个 harness，只打第一次 —— 排查时要看到路径和 mtime，
+    // 但重复 20 次会把真正的失败输出淹掉。
+    if (!SidecarHarness.reported) {
+      // eslint-disable-next-line no-console
+      console.log(`[harness] sidecar binary: ${bin} (built ${fs.statSync(bin).mtime.toISOString()})`);
+      SidecarHarness.reported = true;
+    }
     return bin;
   }
+  private static reported = false;
 
   async start(workspaceRoot: string): Promise<void> {
     const bin = SidecarHarness.pickBinary();

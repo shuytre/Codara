@@ -163,6 +163,25 @@ fn json_to_sql(v: &Value) -> rusqlite::types::Value {
     }
 }
 
+/// 获取复用连接：与 `db.migrate` 共用同一条长连接（避免每次 RPC 新开 SQLite 连接）。
+/// 未 migrate 时懒建一次并缓存回 `state.db`。
+fn with_conn<T>(
+    state: &AppState,
+    f: impl FnOnce(&Connection) -> Result<T, Envelope>,
+) -> Result<T, Envelope> {
+    let mut guard = state.db.lock().unwrap();
+    if guard.is_none() {
+        let db_dir = state.app_data_dir().join("db");
+        let _ = std::fs::create_dir_all(&db_dir);
+        match open(&db_dir.join("codara.db")) {
+            Ok(d) => *guard = Some(d),
+            Err(e) => return Err(Envelope::err(error::DB_ERROR, e)),
+        }
+    }
+    let db = guard.as_ref().ok_or_else(|| Envelope::err(error::DB_ERROR, "db unavailable"))?;
+    f(&db.conn)
+}
+
 pub fn db_query(state: &AppState, params: Value) -> Envelope {
     let sql = match params.get("sql").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
@@ -173,41 +192,39 @@ pub fn db_query(state: &AppState, params: Value) -> Envelope {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().map(json_to_sql).collect())
         .unwrap_or_default();
-    let db_dir = state.app_data_dir().join("db");
-    let conn = match Connection::open(db_dir.join("codara.db")) {
-        Ok(c) => c,
-        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
-    };
-    let mut stmt = match conn.prepare(&sql) {
-        Ok(s) => s,
-        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
-    };
-    let col_count = stmt.column_count();
-    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
-    let _ = col_count;
-    let mut rows_out: Vec<Value> = Vec::new();
-    let iter = stmt.query(rusqlite::params_from_iter(args.iter()));
-    match iter {
-        Ok(mut rows) => {
-            while let Ok(Some(row)) = rows.next() {
-                let mut obj = serde_json::Map::new();
-                for (i, name) in column_names.iter().enumerate() {
-                    let v: Value = match row.get_ref(i) {
-                        Ok(rusqlite::types::ValueRef::Null) => Value::Null,
-                        Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
-                        Ok(rusqlite::types::ValueRef::Real(f)) => json!(f),
-                        Ok(rusqlite::types::ValueRef::Text(t)) => json!(String::from_utf8_lossy(t)),
-                        Ok(rusqlite::types::ValueRef::Blob(b)) => json!(String::from_utf8_lossy(b)),
-                        Err(_) => Value::Null,
-                    };
-                    obj.insert(name.clone(), v);
+    with_conn(state, |conn| {
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => return Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        };
+        let col_count = stmt.column_count();
+        let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let _ = col_count;
+        let mut rows_out: Vec<Value> = Vec::new();
+        let iter = stmt.query(rusqlite::params_from_iter(args.iter()));
+        match iter {
+            Ok(mut rows) => {
+                while let Ok(Some(row)) = rows.next() {
+                    let mut obj = serde_json::Map::new();
+                    for (i, name) in column_names.iter().enumerate() {
+                        let v: Value = match row.get_ref(i) {
+                            Ok(rusqlite::types::ValueRef::Null) => Value::Null,
+                            Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
+                            Ok(rusqlite::types::ValueRef::Real(f)) => json!(f),
+                            Ok(rusqlite::types::ValueRef::Text(t)) => json!(String::from_utf8_lossy(t)),
+                            Ok(rusqlite::types::ValueRef::Blob(b)) => json!(String::from_utf8_lossy(b)),
+                            Err(_) => Value::Null,
+                        };
+                        obj.insert(name.clone(), v);
+                    }
+                    rows_out.push(Value::Object(obj));
                 }
-                rows_out.push(Value::Object(obj));
+                Ok(Envelope::ok(json!({ "rows": rows_out })))
             }
-            Envelope::ok(json!({ "rows": rows_out }))
+            Err(e) => Ok(Envelope::err(error::DB_ERROR, e.to_string())),
         }
-        Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
-    }
+    })
+    .unwrap_or_else(|e| e)
 }
 
 pub fn db_exec(state: &AppState, params: Value) -> Envelope {
@@ -220,15 +237,13 @@ pub fn db_exec(state: &AppState, params: Value) -> Envelope {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().map(json_to_sql).collect())
         .unwrap_or_default();
-    let db_dir = state.app_data_dir().join("db");
-    let conn = match Connection::open(db_dir.join("codara.db")) {
-        Ok(c) => c,
-        Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
-    };
-    match conn.execute(&sql, rusqlite::params_from_iter(args.iter())) {
-        Ok(n) => Envelope::ok(json!({ "changes": n })),
-        Err(e) => Envelope::err(error::DB_ERROR, e.to_string()),
-    }
+    with_conn(state, |conn| {
+        match conn.execute(&sql, rusqlite::params_from_iter(args.iter())) {
+            Ok(n) => Ok(Envelope::ok(json!({ "changes": n }))),
+            Err(e) => Ok(Envelope::err(error::DB_ERROR, e.to_string())),
+        }
+    })
+    .unwrap_or_else(|e| e)
 }
 
 pub fn now_ms() -> i64 {

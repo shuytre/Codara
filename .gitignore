@@ -9,3 +9,7 @@ resources/MinGit/
 coverage/
 *.log
 .DS_Store
+
+# core dump（sidecar 崩溃残留，曾误提交 12MB 二进制垃圾）
+core.*
+core
