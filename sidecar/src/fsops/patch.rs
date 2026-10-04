@@ -11,7 +11,7 @@ use crate::rpc::envelope::Envelope;
 use crate::rpc::error;
 use crate::state::AppState;
 
-pub fn fs_patch(state: &mut AppState, params: Value) -> Envelope {
+pub fn fs_patch(state: &AppState, params: Value) -> Envelope {
     let path_str = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "path is required"),

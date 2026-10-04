@@ -78,7 +78,7 @@ pub enum LineEnding {
     Crlf,
 }
 
-pub fn fs_read(state: &mut AppState, params: Value) -> Envelope {
+pub fn fs_read(state: &AppState, params: Value) -> Envelope {
     let path_str = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "path is required"),
@@ -181,7 +181,7 @@ pub fn fs_read(state: &mut AppState, params: Value) -> Envelope {
     env
 }
 
-pub fn fs_meta(state: &mut AppState, params: Value) -> Envelope {
+pub fn fs_meta(state: &AppState, params: Value) -> Envelope {
     let path_str = match params.get("path").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "path is required"),
@@ -202,7 +202,7 @@ pub fn fs_meta(state: &mut AppState, params: Value) -> Envelope {
 }
 
 /// @cache:path:起-止 解析：从读缓存重放
-pub fn cache_resolve(state: &mut AppState, params: Value) -> Envelope {
+pub fn cache_resolve(state: &AppState, params: Value) -> Envelope {
     let r = match params.get("ref").and_then(|v| v.as_str()) {
         Some(r) => r.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "ref is required"),

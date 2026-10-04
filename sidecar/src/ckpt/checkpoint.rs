@@ -22,7 +22,7 @@ fn check_task_id(task_id: &str) -> Result<(), Envelope> {
     }
 }
 
-pub fn ckpt_write(state: &mut AppState, params: Value) -> Envelope {
+pub fn ckpt_write(state: &AppState, params: Value) -> Envelope {
     let task_id = match params.get("taskId").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => return Envelope::err(crate::rpc::error::INVALID_PARAMS, "taskId is required"),
@@ -63,7 +63,7 @@ pub fn ckpt_write(state: &mut AppState, params: Value) -> Envelope {
     Envelope::ok(json!({ "written": true, "file": file.display().to_string() }))
 }
 
-pub fn ckpt_list(state: &mut AppState, params: Value) -> Envelope {
+pub fn ckpt_list(state: &AppState, params: Value) -> Envelope {
     let task_id = match params.get("taskId").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => return Envelope::err(crate::rpc::error::INVALID_PARAMS, "taskId is required"),
@@ -89,7 +89,7 @@ pub fn ckpt_list(state: &mut AppState, params: Value) -> Envelope {
     Envelope::ok(json!({ "checkpoints": items }))
 }
 
-pub fn ckpt_load(state: &mut AppState, params: Value) -> Envelope {
+pub fn ckpt_load(state: &AppState, params: Value) -> Envelope {
     let task_id = match params.get("taskId").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => return Envelope::err(crate::rpc::error::INVALID_PARAMS, "taskId is required"),

@@ -10,10 +10,9 @@ use crate::state::AppState;
 
 fn run_git(state: &AppState, args: &[&str]) -> (i64, String, String) {
     let workdir = state
-        .workspace_root
-        .clone()
+        .workspace_root()
         .unwrap_or_else(|| PathBuf::from("."));
-    let mut cmd = Command::new(&state.git_path);
+    let mut cmd = Command::new(&state.git_path());
     cmd.args(args).current_dir(&workdir);
     #[cfg(windows)]
     {
@@ -31,12 +30,12 @@ fn run_git(state: &AppState, args: &[&str]) -> (i64, String, String) {
 }
 
 /// 文件级快照：add -f 指定路径到临时索引 → 写入 codara-snapshots 分支
-pub fn snapshot(state: &mut AppState, paths: &[PathBuf], label: &str, task_id: &str) -> Envelope {
+pub fn snapshot(state: &AppState, paths: &[PathBuf], label: &str, task_id: &str) -> Envelope {
     let branch = format!("refs/heads/codara-snapshots/{}", task_id);
     // 确保 HEAD 有效（空仓库则先 init）
     let (_, _, _) = run_git(state, &["rev-parse", "--is-inside-work-tree"]);
     // 提交单文件快照：使用独立索引避免污染用户索引
-    let tmp_index = state.app_data_dir.join("tmp").join(format!("snap-index-{}", std::process::id()));
+    let tmp_index = state.app_data_dir().join("tmp").join(format!("snap-index-{}", std::process::id()));
     let _ = std::fs::create_dir_all(tmp_index.parent().unwrap());
     let mut all_args: Vec<String> = vec![];
     for p in paths {
@@ -44,7 +43,7 @@ pub fn snapshot(state: &mut AppState, paths: &[PathBuf], label: &str, task_id: &
     }
     let env_git_index_file = tmp_index.display().to_string();
 
-    let root = state.workspace_root.clone().unwrap_or_default();
+    let root = state.workspace_root().unwrap_or_default();
     let rel_paths: Vec<String> = paths
         .iter()
         .filter_map(|p| p.strip_prefix(&root).ok().map(|r| r.display().to_string()))
@@ -52,7 +51,7 @@ pub fn snapshot(state: &mut AppState, paths: &[PathBuf], label: &str, task_id: &
 
     // 用 stash create + update-ref 实现：先 stage 文件，再创建 tree
     let add_status = {
-        let mut cmd = Command::new(&state.git_path);
+        let mut cmd = Command::new(&state.git_path());
         cmd.arg("add").arg("-f").arg("--");
         for rp in &rel_paths {
             cmd.arg(rp);
@@ -70,7 +69,7 @@ pub fn snapshot(state: &mut AppState, paths: &[PathBuf], label: &str, task_id: &
         return Envelope::err(error::INTERNAL, "snapshot git add failed");
     }
     let (code, tree_id, _) = {
-        let mut cmd = Command::new(&state.git_path);
+        let mut cmd = Command::new(&state.git_path());
         cmd.args(["write-tree"]).env("GIT_INDEX_FILE", &env_git_index_file).current_dir(&root);
         #[cfg(windows)]
         {
@@ -97,7 +96,7 @@ pub fn snapshot(state: &mut AppState, paths: &[PathBuf], label: &str, task_id: &
         ct_args.push(head_id.trim().to_string());
     }
     let (cc, commit_id, cerr) = {
-        let mut cmd = Command::new(&state.git_path);
+        let mut cmd = Command::new(&state.git_path());
         cmd.args(&ct_args).env("GIT_INDEX_FILE", &env_git_index_file).current_dir(&root);
         #[cfg(windows)]
         {
@@ -144,7 +143,7 @@ pub fn list(state: &AppState) -> Envelope {
     Envelope::ok(json!({ "snapshots": snaps }))
 }
 
-pub fn restore(state: &mut AppState, snapshot_id: &str, single_file: Option<&str>) -> Envelope {
+pub fn restore(state: &AppState, snapshot_id: &str, single_file: Option<&str>) -> Envelope {
     let mut args: Vec<String> = vec!["checkout".into(), snapshot_id.to_string(), "--".into()];
     match single_file {
         Some(f) => args.push(f.to_string()),

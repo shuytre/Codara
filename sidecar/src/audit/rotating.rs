@@ -70,16 +70,16 @@ pub fn redact(v: &mut Value) {
     }
 }
 
-pub fn audit_note(state: &mut AppState, params: Value) -> Envelope {
+pub fn audit_note(state: &AppState, params: Value) -> Envelope {
     let mut event = params.clone();
     // 附加时间戳与脱敏
     if let Value::Object(map) = &mut event {
         map.entry("ts".to_string()).or_insert(json!(now_ms_value()));
     }
     redact(&mut event);
-    let ok = write_audit(&state.app_data_dir, &event);
+    let ok = write_audit(&state.app_data_dir(), &event);
     // 磁盘上限守护：超限删除最旧日志
-    enforce_disk_limit(&state.app_data_dir.join("audit"));
+    enforce_disk_limit(&state.app_data_dir().join("audit"));
     Envelope::ok(json!({ "logged": ok }))
 }
 

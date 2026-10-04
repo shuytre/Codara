@@ -38,7 +38,7 @@ impl Sink for Collector {
     }
 }
 
-pub fn search_run(state: &mut AppState, params: Value) -> Envelope {
+pub fn search_run(state: &AppState, params: Value) -> Envelope {
     let pattern = match params.get("pattern").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "pattern is required"),

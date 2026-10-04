@@ -53,12 +53,12 @@ impl SessionTable {
     }
 }
 
-pub fn term_open(state: &mut AppState, params: Value) -> Envelope {
+pub fn term_open(state: &AppState, params: Value) -> Envelope {
     let cwd = params
         .get("cwd")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .or_else(|| state.workspace_root.as_ref().map(|p| p.display().to_string()))
+        .or_else(|| state.workspace_root().as_ref().map(|p| p.display().to_string()))
         .unwrap_or_else(|| ".".to_string());
     let id = state.sessions.insert(Session {
         cwd,
@@ -67,7 +67,7 @@ pub fn term_open(state: &mut AppState, params: Value) -> Envelope {
     Envelope::ok(json!({ "sessionId": id, "shell": default_shell(&state.platform) }))
 }
 
-pub fn term_close(state: &mut AppState, params: Value) -> Envelope {
+pub fn term_close(state: &AppState, params: Value) -> Envelope {
     let id = params.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
     if state.sessions.remove(id) {
         Envelope::ok(json!({ "closed": true }))
@@ -76,7 +76,7 @@ pub fn term_close(state: &mut AppState, params: Value) -> Envelope {
     }
 }
 
-pub fn term_exec(state: &mut AppState, params: Value) -> Envelope {
+pub fn term_exec(state: &AppState, params: Value) -> Envelope {
     let command = match params.get("command").and_then(|v| v.as_str()) {
         Some(c) => c.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "command is required"),
@@ -109,7 +109,7 @@ pub fn term_exec(state: &mut AppState, params: Value) -> Envelope {
         Some(id) => {
             let cwd = state.sessions.get(id).unwrap_or_else(|| {
                 state
-                    .workspace_root
+                    .workspace_root()
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| ".".to_string())
@@ -121,7 +121,7 @@ pub fn term_exec(state: &mut AppState, params: Value) -> Envelope {
                 .get("cwd")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
-                .or_else(|| state.workspace_root.as_ref().map(|p| p.display().to_string()))
+                .or_else(|| state.workspace_root().as_ref().map(|p| p.display().to_string()))
                 .unwrap_or_else(|| ".".to_string());
             let id = state.sessions.insert(Session {
                 cwd,

@@ -11,7 +11,7 @@ fn lock_path(state: &AppState, name: &str) -> std::path::PathBuf {
     state.tasks_dir().join("locks").join(format!("{}.lock", name.replace('/', "_")))
 }
 
-pub fn lock_acquire(state: &mut AppState, params: Value) -> Envelope {
+pub fn lock_acquire(state: &AppState, params: Value) -> Envelope {
     let name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Envelope::err(crate::rpc::error::INVALID_PARAMS, "name is required"),
@@ -72,7 +72,7 @@ pub fn lock_acquire(state: &mut AppState, params: Value) -> Envelope {
     Envelope::ok(json!({ "acquired": true, "name": name }))
 }
 
-pub fn lock_heartbeat(state: &mut AppState, params: Value) -> Envelope {
+pub fn lock_heartbeat(state: &AppState, params: Value) -> Envelope {
     let name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Envelope::err(crate::rpc::error::INVALID_PARAMS, "name is required"),
@@ -89,7 +89,7 @@ pub fn lock_heartbeat(state: &mut AppState, params: Value) -> Envelope {
     Envelope::err(error::INTERNAL, "cannot update lock")
 }
 
-pub fn lock_release(state: &mut AppState, params: Value) -> Envelope {
+pub fn lock_release(state: &AppState, params: Value) -> Envelope {
     let name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Envelope::err(crate::rpc::error::INVALID_PARAMS, "name is required"),
@@ -101,7 +101,7 @@ pub fn lock_release(state: &mut AppState, params: Value) -> Envelope {
     }
 }
 
-pub fn lock_inspect(state: &mut AppState, params: Value) -> Envelope {
+pub fn lock_inspect(state: &AppState, params: Value) -> Envelope {
     // 检查全部锁：返回 held（健康）与 stale（过期）分组
     let dir = state.tasks_dir().join("locks");
     let ttl = params.get("ttlMs").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_TTL_MS);

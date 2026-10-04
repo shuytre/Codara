@@ -109,8 +109,8 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS idx_usage_day ON usage_ledger(day);",
 ];
 
-pub fn db_migrate(state: &mut AppState, _params: Value) -> Envelope {
-    let db_dir = state.app_data_dir.join("db");
+pub fn db_migrate(state: &AppState, _params: Value) -> Envelope {
+    let db_dir = state.app_data_dir().join("db");
     let db_path = db_dir.join("codara.db");
     let db = match open(&db_path) {
         Ok(d) => d,
@@ -163,7 +163,7 @@ fn json_to_sql(v: &Value) -> rusqlite::types::Value {
     }
 }
 
-pub fn db_query(state: &mut AppState, params: Value) -> Envelope {
+pub fn db_query(state: &AppState, params: Value) -> Envelope {
     let sql = match params.get("sql").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "sql is required"),
@@ -173,7 +173,7 @@ pub fn db_query(state: &mut AppState, params: Value) -> Envelope {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().map(json_to_sql).collect())
         .unwrap_or_default();
-    let db_dir = state.app_data_dir.join("db");
+    let db_dir = state.app_data_dir().join("db");
     let conn = match Connection::open(db_dir.join("codara.db")) {
         Ok(c) => c,
         Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),
@@ -210,7 +210,7 @@ pub fn db_query(state: &mut AppState, params: Value) -> Envelope {
     }
 }
 
-pub fn db_exec(state: &mut AppState, params: Value) -> Envelope {
+pub fn db_exec(state: &AppState, params: Value) -> Envelope {
     let sql = match params.get("sql").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "sql is required"),
@@ -220,7 +220,7 @@ pub fn db_exec(state: &mut AppState, params: Value) -> Envelope {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().map(json_to_sql).collect())
         .unwrap_or_default();
-    let db_dir = state.app_data_dir.join("db");
+    let db_dir = state.app_data_dir().join("db");
     let conn = match Connection::open(db_dir.join("codara.db")) {
         Ok(c) => c,
         Err(e) => return Envelope::err(error::DB_ERROR, e.to_string()),

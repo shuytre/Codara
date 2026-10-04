@@ -1,8 +1,24 @@
 //! 全局状态：工作区、读缓存、终端会话、DB 连接、审计器、快照库。
+//!
+//! 第 6 轮（会话并行）：`AppState` 必须可跨线程共享 —— 请求循环改为
+//! 「每请求一 worker 线程」后，多个会话的工具调用会真正并发进入 dispatch。
+//! 因此原先的裸字段改为**内部可变**（RwLock / AtomicBool），且 dispatch 与各模块
+//! 处理函数一律只拿 `&AppState`：
+//!   - 保留 `&AppState` 等于给整个 sidecar 加一把全局大锁，并行度归零，
+//!     改了等于没改；
+//!   - 真正需要互斥的热点（DB / 快照库 / 索引 / 读缓存）本来就各自有 Mutex，
+//!     粒度比全局锁细得多。
+//!
+//! 并发安全边界在**方法级**（见 main.rs 的 write_lock）：
+//!   - 只读方法（fs.read / search.run / msg.list / db.query …）可自由并发；
+//!   - 有副作用的方法（fs.patch / term.exec / git.exec / snap.* / db.exec …）
+//!     由请求循环用一把 workspace 级写锁串行化 —— 两个会话同时改同一个工作区、
+//!     同时跑 git，是会真出事的（快照半写、索引锁冲突、命令互相污染）。
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, RwLock};
 
 use crate::db::Database;
 use crate::index::IndexState;
@@ -16,18 +32,21 @@ pub struct ReadCache {
 }
 
 pub struct AppState {
-    pub workspace_root: Option<PathBuf>,
-    pub app_data_dir: PathBuf, // .codara 目录
+    /// 工作区根（initialize 写入后只读）
+    workspace_root: RwLock<Option<PathBuf>>,
+    /// .codara 目录（同上）
+    app_data_dir: RwLock<PathBuf>,
     pub read_cache: Mutex<HashMap<String, ReadCache>>,
     pub sessions: SessionTable,
     pub db: Mutex<Option<Database>>,
     pub cas: Mutex<Option<CasStore>>,
     /// M5 代码索引（独立 SQLite，懒创建；None=未开库）
     pub index: Mutex<Option<IndexState>>,
-    pub git_path: String,
+    git_path: RwLock<String>,
+    /// 平台标识：进程内恒定，保持裸值（Copy，无锁成本）
     pub platform: String,
-    pub initialized: bool,
-    pub shutdown_requested: bool,
+    initialized: AtomicBool,
+    shutdown_requested: AtomicBool,
     /// 下一次输出的缓存 id（治理管线落盘后登记）
     pub spill_counter: std::sync::atomic::AtomicU64,
 }
@@ -35,27 +54,73 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         AppState {
-            workspace_root: None,
-            app_data_dir: PathBuf::from(".codara"),
+            workspace_root: RwLock::new(None),
+            app_data_dir: RwLock::new(PathBuf::from(".codara")),
             read_cache: Mutex::new(HashMap::new()),
             sessions: SessionTable::new(),
             db: Mutex::new(None),
             cas: Mutex::new(None),
             index: Mutex::new(None),
-            git_path: "git".to_string(),
+            git_path: RwLock::new("git".to_string()),
             platform: std::env::consts::OS.to_string(),
-            initialized: false,
-            shutdown_requested: false,
+            initialized: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
             spill_counter: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    // ---------- 并发访问器（替代直接读字段） ----------
+
+    /// 工作区根快照；未初始化返回 None
+    pub fn workspace_root(&self) -> Option<PathBuf> {
+        self.workspace_root.read().unwrap().clone()
+    }
+
+    /// 设置工作区根（仅 initialize）
+    pub fn set_workspace_root(&self, p: PathBuf) {
+        *self.workspace_root.write().unwrap() = Some(p);
+    }
+
+    /// .codara 目录快照
+    pub fn app_data_dir(&self) -> PathBuf {
+        self.app_data_dir.read().unwrap().clone()
+    }
+
+    /// 设置 .codara 目录（仅 initialize）
+    pub fn set_app_data_dir(&self, p: PathBuf) {
+        *self.app_data_dir.write().unwrap() = p;
+    }
+
+    /// git 可执行路径
+    pub fn git_path(&self) -> String {
+        self.git_path.read().unwrap().clone()
+    }
+
+    pub fn set_git_path(&self, p: String) {
+        *self.git_path.write().unwrap() = p;
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        self.initialized.load(Ordering::SeqCst)
+    }
+
+    pub fn set_initialized(&self, v: bool) {
+        self.initialized.store(v, Ordering::SeqCst);
+    }
+
+    pub fn shutdown_requested(&self) -> bool {
+        self.shutdown_requested.load(Ordering::SeqCst)
+    }
+
+    pub fn request_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
     }
 
     /// 解析工作区内相对路径并做逃逸校验（.. / 绝对路径越界）
     pub fn resolve_in_workspace(&self, p: &str) -> Result<PathBuf, crate::rpc::envelope::Envelope> {
         use crate::rpc::error;
         let root = self
-            .workspace_root
-            .clone()
+            .workspace_root()
             .ok_or_else(|| crate::rpc::envelope::Envelope::err(error::INVALID_REQUEST, "workspace not initialized"))?;
         let path = PathBuf::from(p);
         let full = if path.is_absolute() {
@@ -94,11 +159,11 @@ impl AppState {
     }
 
     pub fn tasks_dir(&self) -> PathBuf {
-        self.app_data_dir.join("tasks")
+        self.app_data_dir().join("tasks")
     }
 
     pub fn tmp_dir(&self) -> PathBuf {
-        self.app_data_dir.join("tmp")
+        self.app_data_dir().join("tmp")
     }
 }
 

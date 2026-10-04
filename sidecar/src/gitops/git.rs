@@ -15,7 +15,7 @@ const WRITE_OPS: &[&str] = &[
     "commit", "branch-create", "worktree-create", "worktree-remove", "revert",
 ];
 
-pub fn git_exec(state: &mut AppState, params: Value) -> Envelope {
+pub fn git_exec(state: &AppState, params: Value) -> Envelope {
     let op = match params.get("op").and_then(|v| v.as_str()) {
         Some(o) => o.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "op is required"),
@@ -49,13 +49,12 @@ pub fn git_exec(state: &mut AppState, params: Value) -> Envelope {
     Envelope::err(error::INVALID_PARAMS, format!("unknown git op: {}", op))
 }
 
-fn run_git_op(state: &mut AppState, op: &str, args: &Value) -> Envelope {
+fn run_git_op(state: &AppState, op: &str, args: &Value) -> Envelope {
     let workdir = state
-        .workspace_root
-        .clone()
+        .workspace_root()
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    let mut cmd = Command::new(&state.git_path);
+    let mut cmd = Command::new(&state.git_path());
     let mut argv: Vec<String> = Vec::new();
 
     match op {

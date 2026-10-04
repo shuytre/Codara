@@ -10,7 +10,7 @@ use crate::rpc::error;
 use crate::state::AppState;
 
 fn open_conn(state: &AppState) -> Result<Connection, String> {
-    let db_dir = state.app_data_dir.join("db");
+    let db_dir = state.app_data_dir().join("db");
     let _ = std::fs::create_dir_all(&db_dir);
     let conn = Connection::open(db_dir.join("codara.db")).map_err(|e| e.to_string())?;
     // 防御性建表：schema 权威来源是 db.migrate；此处仅保证独立调用不因缺表崩溃
@@ -83,7 +83,7 @@ fn assert_role(conn: &Connection, session_id: &str, role_id: &str) -> Result<(St
     Ok((kind, role))
 }
 
-pub fn session_create(state: &mut AppState, params: Value) -> Envelope {
+pub fn session_create(state: &AppState, params: Value) -> Envelope {
     let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("main").to_string();
     if kind != "main" && kind != "crew" {
         return Envelope::err(error::INVALID_PARAMS, "kind must be main|crew");
@@ -111,7 +111,7 @@ pub fn session_create(state: &mut AppState, params: Value) -> Envelope {
 
 /// 重命名会话标题（首条用户消息回填，左栏可辨识）。
 /// 新建时只能拿到「对话 <时间>」这类无信息量标题，等首条消息到达后再回填。
-pub fn session_rename(state: &mut AppState, params: Value) -> Envelope {
+pub fn session_rename(state: &AppState, params: Value) -> Envelope {
     let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "sessionId is required"),
@@ -138,7 +138,7 @@ pub fn session_rename(state: &mut AppState, params: Value) -> Envelope {
 /// 同事务级联删除该会话的全部 messages，避免留下孤儿行 —— 否则一旦重新读到
 /// 这些孤立 tool 消息，模型接口会以 400 拒绝整个会话（工具调用从此全失败）。
 /// 不特判「主对话」：是否允许删除由上层（渲染层固定项）决定，sidecar 只负责删干净。
-pub fn session_delete(state: &mut AppState, params: Value) -> Envelope {
+pub fn session_delete(state: &AppState, params: Value) -> Envelope {
     let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
         Some(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => return Envelope::err(error::INVALID_PARAMS, "sessionId is required"),
@@ -168,7 +168,7 @@ pub fn session_delete(state: &mut AppState, params: Value) -> Envelope {
     Envelope::ok(json!({ "deleted": removed }))
 }
 
-pub fn msg_append(state: &mut AppState, params: Value) -> Envelope {
+pub fn msg_append(state: &AppState, params: Value) -> Envelope {
     let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "sessionId is required"),
@@ -226,7 +226,7 @@ pub fn msg_append(state: &mut AppState, params: Value) -> Envelope {
 ///  - 按 created_at 倒序（最新在前）；`createdAt` 为毫秒时间戳，渲染层据此分组「今天/更早」；
 ///  - 不做角色隔离断言：会话**列表**不含任何消息内容，只是 (id, title, createdAt) 元信息；
 ///    真正的隔离在 msg.list / msg.append 上（仍需 roleId），不会被这里绕过。
-pub fn session_list(state: &mut AppState, params: Value) -> Envelope {
+pub fn session_list(state: &AppState, params: Value) -> Envelope {
     let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("main").to_string();
     let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).max(1).min(500);
 
@@ -256,7 +256,7 @@ pub fn session_list(state: &mut AppState, params: Value) -> Envelope {
     }
 }
 
-pub fn msg_list(state: &mut AppState, params: Value) -> Envelope {    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+pub fn msg_list(state: &AppState, params: Value) -> Envelope {    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "sessionId is required"),
     };

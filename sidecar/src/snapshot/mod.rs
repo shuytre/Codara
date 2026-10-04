@@ -8,7 +8,7 @@ use crate::rpc::envelope::Envelope;
 use crate::rpc::error;
 use crate::state::AppState;
 
-pub fn snap_create(state: &mut AppState, params: Value) -> Envelope {
+pub fn snap_create(state: &AppState, params: Value) -> Envelope {
     let paths: Vec<String> = params
         .get("paths")
         .and_then(|v| v.as_array())
@@ -29,8 +29,7 @@ pub fn snap_create(state: &mut AppState, params: Value) -> Envelope {
     }
 
     let in_git = state
-        .workspace_root
-        .as_ref()
+        .workspace_root()
         .map(|r| r.join(".git").exists())
         .unwrap_or(false);
 
@@ -40,7 +39,7 @@ pub fn snap_create(state: &mut AppState, params: Value) -> Envelope {
         // 注意：不可在 match 的锁守卫存活期内重复 lock（会死锁）
         let need_init = state.cas.lock().unwrap().is_none();
         if need_init {
-            let mut cas = cas::CasStore::new(state.app_data_dir.join("snapshots"));
+            let mut cas = cas::CasStore::new(state.app_data_dir().join("snapshots"));
             let r = cas.store_files(&resolved, task_id);
             *state.cas.lock().unwrap() = Some(cas);
             r
@@ -51,11 +50,10 @@ pub fn snap_create(state: &mut AppState, params: Value) -> Envelope {
     }
 }
 
-pub fn snap_list(state: &mut AppState, params: Value) -> Envelope {
+pub fn snap_list(state: &AppState, params: Value) -> Envelope {
     let task_id = params.get("taskId").and_then(|v| v.as_str());
     let in_git = state
-        .workspace_root
-        .as_ref()
+        .workspace_root()
         .map(|r| r.join(".git").exists())
         .unwrap_or(false);
     if in_git {
@@ -68,15 +66,14 @@ pub fn snap_list(state: &mut AppState, params: Value) -> Envelope {
     }
 }
 
-pub fn snap_restore(state: &mut AppState, params: Value) -> Envelope {
+pub fn snap_restore(state: &AppState, params: Value) -> Envelope {
     let snapshot_id = match params.get("snapshotId").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return Envelope::err(error::INVALID_PARAMS, "snapshotId is required"),
     };
     let single_file = params.get("path").and_then(|v| v.as_str()).map(String::from);
     let in_git = state
-        .workspace_root
-        .as_ref()
+        .workspace_root()
         .map(|r| r.join(".git").exists())
         .unwrap_or(false);
     if in_git {
@@ -86,7 +83,7 @@ pub fn snap_restore(state: &mut AppState, params: Value) -> Envelope {
             Some(cas) => cas.restore(
                 &snapshot_id,
                 single_file.as_deref(),
-                state.workspace_root.as_deref(),
+                state.workspace_root().as_deref(),
             ),
             None => Envelope::err(error::SNAPSHOT_NOT_FOUND, "no snapshot store"),
         }

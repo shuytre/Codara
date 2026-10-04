@@ -80,12 +80,12 @@ CREATE TABLE IF NOT EXISTS idx_doclen (
 ";
 
 pub fn index_dir(state: &AppState) -> PathBuf {
-    state.app_data_dir.join("index")
+    state.app_data_dir().join("index")
 }
 
 fn ws_hash(state: &AppState) -> String {
     use sha2::{Digest, Sha256};
-    let root = state.workspace_root.clone().unwrap_or_default();
+    let root = state.workspace_root().unwrap_or_default();
     let h = Sha256::digest(root.to_string_lossy().as_bytes());
     hex::encode(&h[..8])
 }
@@ -128,7 +128,7 @@ fn open_index_db(state: &AppState) -> Result<IndexState, String> {
 }
 
 fn with_index<T>(
-    state: &mut AppState,
+    state: &AppState,
     f: impl FnOnce(&mut IndexState) -> Result<T, String>,
 ) -> Result<T, Envelope> {
     let mut guard = state.index.lock().unwrap();
@@ -150,15 +150,15 @@ macro_rules! try_index {
 
 // ---------------- index.build（分片 tick） ----------------
 
-pub fn index_build(state: &mut AppState, params: Value) -> Envelope {
-    if state.workspace_root.is_none() {
+pub fn index_build(state: &AppState, params: Value) -> Envelope {
+    if state.workspace_root().is_none() {
         return Envelope::err(error::INVALID_REQUEST, "workspace not initialized");
     }
     let max_files = params
         .get("maxFiles")
         .and_then(|v| v.as_u64())
         .unwrap_or(TICK_MAX_FILES as u64) as usize;
-    let root = state.workspace_root.clone().unwrap();
+    let root = state.workspace_root().unwrap();
 
     // 首个 tick：确保索引库打开；队列空时做一次增量对账（walk + 差异入队）
     let _walk_changed = try_index!(state, |idx| {
@@ -364,7 +364,7 @@ fn upsert_file_row(
 
 // ---------------- index.status / pause / resume / configure ----------------
 
-pub fn index_status(state: &mut AppState, _params: Value) -> Envelope {
+pub fn index_status(state: &AppState, _params: Value) -> Envelope {
     let opt = state.index.lock().unwrap();
     match opt.as_ref() {
         Some(idx) => {
@@ -393,7 +393,7 @@ pub fn index_status(state: &mut AppState, _params: Value) -> Envelope {
     }
 }
 
-pub fn index_pause(state: &mut AppState, _params: Value) -> Envelope {
+pub fn index_pause(state: &AppState, _params: Value) -> Envelope {
     try_index!(state, |idx| {
         idx.paused = true;
         Ok(())
@@ -401,7 +401,7 @@ pub fn index_pause(state: &mut AppState, _params: Value) -> Envelope {
     Envelope::ok(json!({ "paused": true }))
 }
 
-pub fn index_resume(state: &mut AppState, _params: Value) -> Envelope {
+pub fn index_resume(state: &AppState, _params: Value) -> Envelope {
     try_index!(state, |idx| {
         idx.paused = false;
         Ok(())
@@ -410,7 +410,7 @@ pub fn index_resume(state: &mut AppState, _params: Value) -> Envelope {
 }
 
 /// index.configure { semantic?: bool }：轻量语义检索开关（默认关，规格 5.4）
-pub fn index_configure(state: &mut AppState, params: Value) -> Envelope {
+pub fn index_configure(state: &AppState, params: Value) -> Envelope {
     let semantic = params.get("semantic").and_then(|v| v.as_bool());
     let enabled = try_index!(state, |idx| {
         if let Some(on) = semantic {
@@ -430,7 +430,7 @@ pub fn index_configure(state: &mut AppState, params: Value) -> Envelope {
 
 /// index.symbols { name, kind?, exact?, limit? }：定义/大纲查询。
 /// 索引为空时降级快路径（仅文件名匹配，<1s 口径）。
-pub fn index_symbols(state: &mut AppState, params: Value) -> Envelope {
+pub fn index_symbols(state: &AppState, params: Value) -> Envelope {
     let name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => return Envelope::err(error::INVALID_PARAMS, "name is required"),
@@ -438,7 +438,7 @@ pub fn index_symbols(state: &mut AppState, params: Value) -> Envelope {
     let kind = params.get("kind").and_then(|v| v.as_str()).map(|s| s.to_string());
     let exact = params.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50).min(500) as usize;
-    let root = match state.workspace_root.clone() {
+    let root = match state.workspace_root() {
         Some(r) => r,
         None => return Envelope::err(error::INVALID_REQUEST, "workspace not initialized"),
     };
@@ -497,7 +497,7 @@ pub fn index_symbols(state: &mut AppState, params: Value) -> Envelope {
 
 /// index.semantic { query, limit? }：BM25F 全文 + 符号名/路径加权 + 模糊。
 /// 默认关（规格 5.4）：未开启返回 8002 SEMANTIC_DISABLED。
-pub fn index_semantic(state: &mut AppState, params: Value) -> Envelope {
+pub fn index_semantic(state: &AppState, params: Value) -> Envelope {
     let query = match params.get("query").and_then(|v| v.as_str()) {
         Some(q) if !q.trim().is_empty() => q.trim().to_string(),
         _ => return Envelope::err(error::INVALID_PARAMS, "query is required"),
