@@ -22,8 +22,8 @@ fn run_git(state: &AppState, args: &[&str]) -> (i64, String, String) {
     match cmd.output() {
         Ok(o) => (
             o.status.code().unwrap_or(-1) as i64,
-            String::from_utf8_lossy(&o.stdout).to_string(),
-            String::from_utf8_lossy(&o.stderr).to_string(),
+            crate::fsops::read::decode_console_output(&o.stdout),
+            crate::fsops::read::decode_console_output(&o.stderr),
         ),
         Err(e) => (-1, String::new(), e.to_string()),
     }

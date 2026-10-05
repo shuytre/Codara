@@ -152,8 +152,10 @@ fn run_git_op(state: &AppState, op: &str, args: &Value) -> Envelope {
         Ok(o) => o,
         Err(e) => return Envelope::err(error::INTERNAL, format!("git spawn failed: {}", e)),
     };
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // 第 7 轮：Windows 下 git 按活动代码页输出 GBK，中文需 GB18030 回退，
+    // 否则 `git log -- 文件名` 里的中文路径全变替换字符。
+    let stdout = crate::fsops::read::decode_console_output(&output.stdout);
+    let stderr = crate::fsops::read::decode_console_output(&output.stderr);
     let code = output.status.code().unwrap_or(-1);
     let mut data = json!({ "op": op, "exitCode": code, "output": stdout, "stderr": stderr });
     if code == 0 {

@@ -36,6 +36,29 @@ pub fn detect_encoding(bytes: &[u8]) -> (&'static str, Vec<u8>) {
     ("binary", bytes.to_vec())
 }
 
+/// 子进程/外部命令输出的文本解码。
+///
+/// 第 7 轮：Windows 下 PowerShell、git 等按活动代码页（简体中文 = CP936/GBK）
+/// 输出，此前一律 `from_utf8_lossy` 导致中文全变 `������`。
+/// 工具结果要回灌给模型，替换字符等于信息全丢。
+///
+/// 策略与 [`detect_encoding`] 的文本嗅探一致：**先严格试 UTF-8，失败退 GB18030**
+/// （GBK/GB2312 的超集）。UTF-8 机器行为完全不变。
+pub fn decode_console_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    let (decoded, _, had_errors) = encoding_rs::GB18030.decode(bytes);
+    if !had_errors {
+        return decoded.to_string();
+    }
+    // GB18030 也解不出 → 确实是二进制残留，才退回有损解码
+    String::from_utf8_lossy(bytes).to_string()
+}
+
 pub fn is_probably_binary(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
@@ -255,4 +278,54 @@ fn guess_mime(p: &std::path::Path) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::decode_console_output;
+
+    #[test]
+    fn utf8_passthrough() {
+        // 纯 UTF-8（Linux/macOS 正常输出）必须原样返回，不做任何转码
+        let s = "hello 世界 🚀";
+        assert_eq!(decode_console_output(s.as_bytes()), s);
+    }
+
+    #[test]
+    fn empty_is_empty() {
+        assert_eq!(decode_console_output(&[]), "");
+    }
+
+    #[test]
+    fn gbk_chinese_recovers() {
+        // 「中文」的 GBK 编码：D6 D0 CE C4
+        // 旧实现走 from_utf8_lossy，这两个字节在 UTF-8 里非法，会被替换成 U+FFFD
+        // —— 用户看到的「乱码」就是它。现在必须还原成「中文」。
+        let gbk = [0xD6u8, 0xD0, 0xCE, 0xC4];
+        assert_eq!(decode_console_output(&gbk), "中文");
+    }
+
+    #[test]
+    fn gbk_windows_path_recovers() {
+        // Windows 控制台常见的 GBK 路径「C:\用户\桌面」的「用户」
+        let gbk = [0xD3u8, 0xC3, 0xBB, 0xA7];
+        assert_eq!(decode_console_output(&gbk), "用户");
+    }
+
+    #[test]
+    fn gbk_sentence_recovers() {
+        // 「命令执行成功」的 GBK 字节
+        let gbk = [
+            0xC3u8, 0xFC, 0xC1, 0xEE, 0xD6, 0xB4, 0xD0, 0xD0, 0xB3, 0xC9, 0xB9, 0xA6,
+        ];
+        assert_eq!(decode_console_output(&gbk), "命令执行成功");
+    }
+
+    #[test]
+    fn binary_garbage_does_not_panic() {
+        // 真二进制（GB18030 也解不出）必须安全降级，绝不 panic
+        let junk = [0x00u8, 0x01, 0xFF, 0xFE, 0x80, 0x81];
+        let s = decode_console_output(&junk);
+        assert!(!s.is_empty()); // 有损解码至少留个痕迹，供排查
+    }
 }

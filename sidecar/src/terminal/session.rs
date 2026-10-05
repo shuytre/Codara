@@ -1,7 +1,7 @@
 //! terminal 工具（Agent 通道）：持久会话（cwd 状态保持）、超时控制、输出治理。
 //! 注意：模型输入的 command 永远是单条命令；内部 cd 包装不属于模型链式命令。
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -74,6 +74,11 @@ pub fn term_close(state: &AppState, params: Value) -> Envelope {
     } else {
         Envelope::err(error::TERM_SESSION_NOT_FOUND, format!("session not found: {}", id))
     }
+}
+
+/// 子进程输出解码（复用 fsops 的统一实现，含 Windows GB18030 回退）。
+fn decode_output(bytes: &[u8]) -> String {
+    crate::fsops::read::decode_console_output(bytes)
 }
 
 pub fn term_exec(state: &AppState, params: Value) -> Envelope {
@@ -243,19 +248,10 @@ fn run_shell(
     let pid = child.id();
     let stdout_handle = child.stdout.take().map(|s| {
         std::thread::spawn(move || {
-            let mut buf = String::new();
+            let mut buf = Vec::new();
             let mut r = BufReader::new(s);
-            loop {
-                match r.fill_buf() {
-                    Ok(chunk) if !chunk.is_empty() => {
-                        buf.push_str(&String::from_utf8_lossy(chunk));
-                        let len = chunk.len();
-                        r.consume(len);
-                    }
-                    _ => break,
-                }
-            }
-            buf
+            let _ = r.read_to_end(&mut buf);
+            decode_output(&buf)
         })
     });
     let stderr_handle = child.stderr.take().map(|s| {
@@ -263,7 +259,7 @@ fn run_shell(
             let mut buf = Vec::new();
             let mut r = BufReader::new(s);
             let _ = r.read_to_end(&mut buf);
-            String::from_utf8_lossy(&buf).to_string()
+            decode_output(&buf)
         })
     });
 

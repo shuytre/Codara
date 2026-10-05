@@ -146,6 +146,9 @@ export function Composer() {
 
   return (
     <div class="composer">
+      {/* 第 7 轮：内层限宽 860px，与 .entry 对齐。
+          此前对话条目限宽、输入框铺满，窗口较窄时左右边界不齐（「不是一个正方形」）。 */}
+      <div class="composer-inner">
       <Show when={usage.budget.suspended}>
         <div class="budget-banner">预算已熔断，任务已挂起 —— 请在右栏处理</div>
       </Show>
@@ -243,6 +246,7 @@ export function Composer() {
             </button>
           </Show>
         </div>
+      </div>
       </div>
     </div>
   );
