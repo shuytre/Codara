@@ -154,7 +154,16 @@ export interface ApprovalRespondPayload {
 export type ChatEventPayload =
   | { kind: 'delta'; text: string; sessionId?: string }
   | { kind: 'card'; card: Card; sessionId?: string }
-  | { kind: 'done'; text: string; usage?: unknown; sessionId?: string };
+  /**
+   * 工具调用过程的步骤标题（模型为这一步写的摘要，如「读取配置文件」）。
+   *
+   * 与 delta 分开：delta 是**最终回复**的正文，process 属于「执行过程」，
+   * 渲染层把它归进折叠容器。两者混用会让半截结论提前显示在工具卡之前。
+   * text 为空串表示模型没给摘要，渲染层回退到参数摘要。
+   */
+  | { kind: 'process'; text: string; sessionId?: string }
+  /** 本轮结束。ok=true 表示 text 是模型的最终回复；false 表示终止/错误说明 */
+  | { kind: 'done'; text: string; ok?: boolean; usage?: unknown; sessionId?: string };
 
 /**
  * 历史工具调用（chat:switch 回传）。

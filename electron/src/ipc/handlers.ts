@@ -270,12 +270,18 @@ export function registerIpcHandlers(deps: HandlerDeps): void {
         deltaBuf += t;
         if (!deltaTimer) deltaTimer = setTimeout(flushDelta, 50);
       },
-      onDone: (full) => {
+      // 工具调用过程的步骤摘要：即时推送（不进 delta 的批量通道 —— 它属于过程，
+      // 要在相应工具卡出现前就绪，否则折叠容器里的标题会晚于卡片出现）。
+      onProcessStep: (text) => {
+        if (alive()) win.webContents.send(IPC.chatEvent, { kind: 'process', text, sessionId });
+      },
+      onDone: (full, ok) => {
         if (deltaTimer) flushDelta();
         if (!alive()) return;
         win.webContents.send(IPC.chatEvent, {
           kind: 'done',
           text: full,
+          ok: ok !== false,
           usage: rt.budget.snapshot(),
           sessionId,
         });

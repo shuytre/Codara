@@ -123,6 +123,23 @@ export interface ChatEntry {
   usage?: { promptTokens: number; completionTokens: number };
   model?: string;
   effort?: string;
+  /**
+   * 条目种类（第 8 轮）。
+   *
+   * - `final`：本轮最终回复正文（assistant）。渲染在折叠容器**下方**。
+   * - `process`：工具执行过程（步骤摘要 + 工具卡）。进折叠容器，默认折叠。
+   * - `step`：过程里的一条步骤标题（模型给的一句话摘要）。
+   *
+   * 缺省（undefined）视为最终回复，兼容历史数据。
+   */
+  kind?: 'final' | 'process' | 'step';
+  /**
+   * 该条 step 所属的过程分组 id。
+   *
+   * 一轮用户任务 = 一个过程分组：从第一条 tool_calls 到最后一条工具结果。
+   * 渲染层按这个 id 把散落的 step / 工具卡收进同一个折叠容器。
+   */
+  processGroup?: string;
 }
 
 /** 预算状态（用量面板） */

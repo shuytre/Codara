@@ -288,6 +288,12 @@ export class CrewScheduler implements CrewSchedulerLike {
         inst.currentAction = 'thinking';
         this.emitInstance(inst);
       },
+      // 专家团实例的工具步骤摘要同样不进主对话流：过程由左栏角色树呈现，
+      // 卡片另走 crew:card 通道。这里只把状态推进到「执行中」。
+      onProcessStep: () => {
+        inst.currentAction = 'acting';
+        this.emitInstance(inst);
+      },
       onCard: (card) => {
         this.emit('crew:card', { instanceId: inst.id, role: inst.role, card });
       },

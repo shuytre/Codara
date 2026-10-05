@@ -21,10 +21,18 @@ export interface SessionChatState {
   streamText: string;
   /** 本轮流式回复的文本条目 id：delta 的实时挂载点，done 时收尾 */
   liveId: string | null;
+  /**
+   * 本轮工具执行过程的分组 id（第 8 轮）。
+   *
+   * 一轮用户任务从**首次 tool_calls** 起进入「执行过程」阶段，此后所有
+   * step 摘要与工具卡都挂在这个 gid 下，由渲染层收进同一个折叠容器。
+   * 用户发出新提问时清空（新一轮 = 新容器）。
+   */
+  liveProcessGroup: string | null;
 }
 
 function emptyChatState(): SessionChatState {
-  return { entries: [], streaming: false, streamText: '', liveId: null };
+  return { entries: [], streaming: false, streamText: '', liveId: null, liveProcessGroup: null };
 }
 
 export const [chat, setChat] = createStore<{
@@ -202,15 +210,24 @@ export function appendEntry(key: string, e: ChatEntry): void {
   void st;
 }
 
+/**
+ * 写入/更新某会话的一张卡片。
+ *
+ * 第 7 轮修「右栏工具流水恒为『暂无工具调用』」：
+ * 此前用 `setCards('bySession', key, produce(...))`。当 `bySession[key]` 还不存在时
+ * （每个新会话的**第一次**卡片必然如此），Solid 对**函数式/produce 更新 + 不存在的路径**
+ * 会**静默丢弃** —— 不抛错、什么都不写。于是聊天流照常出现工具卡（那条路径用的是
+ * 直接赋值，能正常创建），但右栏读 `cards.bySession[key]` 永远拿到 undefined，
+ * 表现就是「明明有工具调用，右栏却说暂无」。
+ *
+ * 改为读-改-写直接赋值：新会话首张卡片由此正常创建。
+ * 顺带保证传入的 card 对象不被 store 代理污染（后续外部读到的就是原对象）。
+ */
 export function upsertCard(key: string, card: Card): void {
-  setCards('bySession', key, produce((list) => {
-    const idx = list.findIndex((c) => c.id === card.id);
-    if (idx >= 0) {
-      list[idx] = card;
-    } else {
-      list.push(card);
-    }
-  }));
+  const list = cards.bySession[key] ?? [];
+  const idx = list.findIndex((c) => c.id === card.id);
+  const next = idx >= 0 ? list.map((c, i) => (i === idx ? card : c)) : [...list, card];
+  setCards('bySession', key, next);
 }
 
 /** 清空某会话的流与卡片（新建/切换会话时只清目标会话） */
@@ -222,13 +239,31 @@ export function clearSession(key: string): void {
 // ---------- 流式回复的实时挂载 ----------
 
 /**
- * 第 6 轮：文本与卡片拆成**独立** entry，按真实到达顺序排列。
+ * 第 8 轮：把「执行过程」与「最终回复」分成两类条目。
  *
- * 此前 ChatEntry 同时装 text 和 cards，ConversationStream 固定先渲染 text
- * 再渲染 cards —— 于是「先调工具、后说话」的真实顺序在 UI 上永远被倒过来，
- * 用户看到的是助手正文 → 一堆工具卡，而实际是工具先跑。
- * 现在卡片事件自己成为一条 entry（role='event'），顺序即事件顺序。
+ * 结构（一轮用户任务）：
+ *   user(提问)
+ *   ├─ process 分组 G  ← 折叠容器「已完成」
+ *   │    step  「读取配置文件」     ← 模型给的一句话摘要
+ *   │    card   read · path=a.json ← 工具卡
+ *   │    step  「执行安装依赖」
+ *   │    card   terminal · command=npm i
+ *   └─ final  「已完成，改动是…」   ← 折叠容器**下方**
+ *
+ * 为什么要分组 id 而不是靠数组位置：工具卡事件与文本事件是异步到达的，
+ * 且同一轮里可能穿插多条 step。用 groupId 显式归属，渲染层才能稳定地把
+ * 它们收进同一个容器，不依赖到达顺序。
  */
+
+/** 开始一个新过程分组（本轮首次 tool_calls 时创建） */
+function ensureProcessGroup(key: string): string {
+  const st = state(key);
+  if (st.liveProcessGroup) return st.liveProcessGroup;
+  const gid = `pg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  setChat('bySession', key, 'liveProcessGroup', gid);
+  // 分组本身不产条目，只是给后续 step/card 打标；容器由渲染层按 groupId 聚合
+  return gid;
+}
 
 /** 确保存在本轮 live 文本条目（首个 delta 到达时创建） */
 function ensureLiveEntry(key: string): string {
@@ -238,9 +273,32 @@ function ensureLiveEntry(key: string): string {
   setChat('bySession', key, 'liveId', id);
   setChat('bySession', key, 'entries', (prev) => [
     ...prev,
-    { id, role: 'assistant' as const, text: '', createdAt: Date.now() },
+    // 第 8 轮：显式标为 final（最终回复），渲染在折叠容器下方
+    { id, role: 'assistant' as const, kind: 'final' as const, text: '', createdAt: Date.now() },
   ]);
   return id;
+}
+
+/**
+ * 工具调用的步骤标题（模型给的摘要）。
+ *
+ * 渲染成折叠容器里的一行：`🔧 read 读取配置文件`。
+ * text 为空串时仍建条目（渲染层回退到参数摘要），保证每步都有标题。
+ */
+export function appendProcessStep(key: string, text: string): void {
+  const gid = ensureProcessGroup(key);
+  const id = `ps-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  setChat('bySession', key, 'entries', (prev) => [
+    ...prev,
+    {
+      id,
+      role: 'event' as const,
+      kind: 'step' as const,
+      processGroup: gid,
+      text: text ?? '',
+      createdAt: Date.now(),
+    },
+  ]);
 }
 
 /** 流式增量直接写入 live 条目 */
@@ -272,28 +330,66 @@ export function attachCardToLive(key: string, card: Card): void {
     }
   }
   // 新卡片：独立 entry（role='event'），从而保留真实事件顺序
+  // 第 8 轮：归属到当前过程分组（同一轮的所有工具卡收进同一个折叠容器）。
+  const gid = ensureProcessGroup(key);
   const id = `ev-${withSession.id}`;
   setChat('bySession', key, 'entries', (prev) => [
     ...prev,
-    { id, role: 'event' as const, text: '', createdAt: withSession.createdAt, cards: [withSession] },
+    {
+      id,
+      role: 'event' as const,
+      kind: 'process' as const,
+      processGroup: gid,
+      text: '',
+      createdAt: withSession.createdAt,
+      cards: [withSession],
+    },
   ]);
+  // 第 7 轮：插卡即**收尾当前 live 文本条目**。
+  //
+  // 此前 liveId 在插卡后不清空，于是工具调用之后模型继续输出的文字会被
+  // appendDeltaToLive 塞回**原来那个** live entry —— 而那个 entry 排在工具卡
+  // 之前，于是结尾文字在渲染上「回到最前面」，与真实顺序相反。
+  // 用户原话：「又是先输出文字、调用工具后，结尾不是连在工具调用的后面输出，
+  // 而是回到最前面。」
+  //
+  // 收尾后 liveId 置空，下一个 delta 会另起新 entry，落在工具卡之后，顺序即真实。
+  if (st.liveId) {
+    setChat('bySession', key, 'liveId', null);
+  }
 }
 
-/** 收尾本轮 live 条目：写入最终文本与元信息，解除 live 标记 */
+/**
+ * 收尾本轮 live 条目：写入最终文本与元信息，解除 live 标记。
+ *
+ * `isFinal=false` 表示这条文本是终止/错误说明，**不是**模型的最终回复：
+ * 标成 system 并去掉 final 标记，避免它被当成正文留在会话里
+ * （历史上「（已终止）」曾以 assistant 正文身份入档，重开会话看着像模型真的这么说）。
+ * 同时清空过程分组，让下一次提问从干净状态开始。
+ */
 export function finalizeLiveEntry(
   key: string,
   finalText?: string,
-  meta?: { model?: string; effort?: string; usage?: { promptTokens: number; completionTokens: number } }
+  meta?: { model?: string; effort?: string; usage?: { promptTokens: number; completionTokens: number } },
+  isFinal = true
 ): void {
   const st = state(key);
   const id = st.liveId;
   setChat('bySession', key, 'liveId', null);
+  setChat('bySession', key, 'liveProcessGroup', null);
   if (!id) {
     // 无 live 条目（如异常直接 done）：回退为独立条目
     if (finalText) {
       setChat('bySession', key, 'entries', (prev) => [
         ...prev,
-        { id: `a-${Date.now()}`, role: 'assistant' as const, text: finalText, createdAt: Date.now(), ...meta },
+        {
+          id: `a-${Date.now()}`,
+          role: (isFinal ? 'assistant' : 'system') as 'assistant' | 'system',
+          kind: isFinal ? ('final' as const) : undefined,
+          text: finalText,
+          createdAt: Date.now(),
+          ...meta,
+        },
       ]);
     }
     return;
@@ -303,6 +399,11 @@ export function finalizeLiveEntry(
     if (meta?.model) e.model = meta.model;
     if (meta?.effort) e.effort = meta.effort;
     if (meta?.usage) e.usage = meta.usage;
+    if (!isFinal) {
+      // 终止/错误说明：降级为系统提示，不再是「最终回复」
+      e.role = 'system';
+      e.kind = undefined;
+    }
   }));
 }
 

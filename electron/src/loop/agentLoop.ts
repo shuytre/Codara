@@ -36,8 +36,22 @@ export interface CrewRunContext {
 
 export interface LoopCallbacks {
   onCard: (card: Card) => void;
+  /** 最终回复的流式增量（只在确认这一轮**没有** tool_calls 后才会发出） */
   onDelta: (text: string) => void;
-  onDone: (fullText: string) => void;
+  /**
+   * 工具调用过程的标题（模型为这一步写的简短摘要）。
+   *
+   * 与 onDelta 分开是刻意的：摘要属于「执行过程」，要进折叠容器；
+   * 最终回复才是正文。两者走同一条通道就没法在渲染层区分，
+   * 结果就是摘要被当成正文显示、最终回复与过程混在一起。
+   * 模型没给摘要时传空串，由渲染层回退到参数摘要。
+   *
+   * **可选**：老调用方（测试桩、无 UI 的嵌入用法）不传也能跑 ——
+   * 内部统一走 `emitProcessStep()` 兜底，避免「没传就 TypeError」把整轮打断。
+   */
+  onProcessStep?: (text: string) => void;
+  /** 收尾：ok=true 时 fullText 是最终回复（模型文本）；ok=false 时是终止/错误说明 */
+  onDone: (fullText: string, ok?: boolean) => void;
   onBudgetSuspended: () => void;
 }
 
@@ -172,6 +186,20 @@ export class AgentLoop {
       }
 
       let result;
+      /**
+       * 本轮流式文本的缓冲。
+       *
+       * 关键：流式阶段**无法预知**这段文字后面会不会跟 tool_calls。
+       * 此前直接 `cb.onDelta(e.text)` 就发出去了 —— 于是模型「先说一段、再调工具」
+       * 时，那段文字被当成正文实时显示在**工具卡之前**；等工具卡插进来，正文
+       * 就变成了「结尾回到最前面」的错位。
+       *
+       * 现在先攒着，等本轮聚合结果出来再定性：
+       *   - 带 tool_calls → 这段文字是「这步要做什么」的摘要 → onProcessStep（进折叠容器）
+       *   - 不带 tool_calls → 这才是最终回复 → 逐段回放 onDelta（保持打字机效果）
+       */
+      const textBuf: string[] = [];
+      let flushable = false;
       try {
         result = await this.model.chatStream(
           {
@@ -182,7 +210,14 @@ export class AgentLoop {
             tools: toolSpecs,
           },
           (e) => {
-            if (e.type === 'delta') cb.onDelta(e.text);
+            if (e.type === 'delta') {
+              if (flushable) {
+                // 已定性为最终回复：实时透传，保留逐字打字效果
+                cb.onDelta(e.text);
+              } else {
+                textBuf.push(e.text);
+              }
+            }
             // 注意：这里的 usage 事件只做展示，不再记账。
             // 原实现在流式回调与收尾处各 record 一次（厂商若每 chunk 带 usage 则 ×N），
             // 导致 costLimitCNY 在真实消耗一半时误熔断，usage 库数据翻倍。
@@ -192,17 +227,17 @@ export class AgentLoop {
       } catch (err) {
         if (this.aborted) {
           // 用户终止：不留错误卡，安静收尾
-          cb.onDone('（已终止）');
+          cb.onDone('（已终止）', false);
           return;
         }
         const msg = `模型调用失败：${(err as Error).message}`;
-        cb.onDone(msg);
+        cb.onDone(msg, false);
         this.messages.push({ role: 'assistant', content: msg });
         return;
       }
 
       if (this.aborted) {
-        cb.onDone('（已终止）');
+        cb.onDone('（已终止）', false);
         return;
       }
 
@@ -214,17 +249,39 @@ export class AgentLoop {
       }
 
       if (result.toolCalls.length === 0) {
-        const finalMsg: ChatMessage = { role: 'assistant', content: result.content };
+        // 没有 tool_calls —— 这才是最终回复（需求 1 第 1/3/4 条）。
+        // 缓冲里的文本按片段回放，让渲染层保持打字机节奏；已实时透传过的
+        // （flushable 分支）不重复发。
+        if (!flushable) {
+          for (const chunk of textBuf) cb.onDelta(chunk);
+        }
+        const finalText = result.content ?? textBuf.join('');
+        const finalMsg: ChatMessage = { role: 'assistant', content: finalText };
         this.messages.push(finalMsg);
         void this.persist(crew, finalMsg, result.usage);
-        cb.onDone(result.content);
+        cb.onDone(finalText, true);
         return;
       }
 
       // 工具循环：assistant 带工具调用 → 逐个执行 → 结果回注
+      //
+      // 需求 1 第 6/7 条：这里必须**丢弃最终文本**，只把 content 当作「本步摘要」，
+      // 绝不能当结论展示。摘要进 onProcessStep（渲染层的折叠容器），
+      // 否则模型「一边说话一边调工具」会把半截结论提前漏给用户。
+      const stepSummary = (result.content ?? textBuf.join('')).trim();
+      cb.onProcessStep?.(stepSummary);
       const assistantMsg: ChatMessage = {
         role: 'assistant',
-        content: result.content || null,
+        // 需求 1 第 8 条：content 与 tool_calls **互斥**。
+        //
+        // 原来写的是 `content: result.content || null` —— 摘要文本被原样钉进历史。
+        // 两个后果：
+        //  1. 违反「禁止同一条 assistant 消息同时含 tool_calls 和最终结论」，
+        //     摘要（本步在做什么）会被下游/审计当成模型说过的话；
+        //  2. 对模型自己是纯噪声：摘要只服务于 UI 的折叠容器，上下文里留着
+        //     只会挤占预算，还可能诱导模型在后续轮次复读它。
+        // 摘要已经通过 onProcessStep 送出去了，这里必须是 null。
+        content: null,
         tool_calls: result.toolCalls.map((tc) => ({
           id: tc.id,
           type: 'function' as const,
@@ -310,7 +367,7 @@ export class AgentLoop {
         }
         if (this.aborted || r === undefined) {
           cb.onCard({ ...card, status: 'failed', result: '已终止', ok: false });
-          cb.onDone('（已终止）');
+          cb.onDone('（已终止）', false);
           return;
         }
 
@@ -340,8 +397,10 @@ export class AgentLoop {
 
         // 工具结果回注模型（截断保护：工具输出最长 8000 字符）
         // 失败时把 error.message 提到顶层，模型更容易直接读到该做什么
+        // 第 7 轮：data 里可能嵌着 sidecar 回显的 tool/params（命令模型自己发过，
+        // 回灌纯噪声且挤占上下文预算），剥离后再回注。
         const payload: Record<string, unknown> = r.ok
-          ? { ok: true, data: r.data, truncated: r.truncated, cacheRef: r.cacheRef }
+          ? { ok: true, data: stripEcho(r.data), truncated: r.truncated, cacheRef: r.cacheRef }
           : { ok: false, error: r.error?.message ?? 'unknown error', code: r.error?.code };
         const toolMsg: ChatMessage = {
           role: 'tool',
@@ -409,9 +468,46 @@ export class AgentLoop {
   private originalSessionId: string | null = null;
 }
 
-function summarizeResult(r: unknown): string {
+/**
+ * 工具结果 → 给模型看的文本。
+ *
+ * 第 7 轮：此前是 `JSON.stringify(整个 ToolResult)`，把 `tool` / `params` / `durationMs`
+ * 一并回灌。命令模型自己刚发过，回显一遍纯属噪声 —— 用户原话「我不是跟你说过
+ * 直接把模型的命令放在 Shell 怎么执行吗」，命令在工具卡「参数」区已经可见，
+ * 结果里再重复一遍只会挤占上下文预算。
+ *
+ * 现在只保留**执行结果本身**：退出码、输出、以及可续读指针。
+ * 失败时保留错误码与消息（模型需要知道成不成、为什么）。
+ */
+/** 剥掉结果里的 tool/params 回显字段（命令模型自己发过，不必回灌） */
+export function stripEcho(v: unknown): unknown {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return v;
+  const { tool: _t, params: _p, ...rest } = v as Record<string, unknown>;
+  return rest;
+}
+
+/** 把工具结果压成回注模型的紧凑文本（导出供回归测试断言「不回显命令」） */
+export function summarizeResult(r: unknown): string {
   try {
-    const s = JSON.stringify(r);
+    if (r === null || typeof r !== 'object') {
+      const s = JSON.stringify(r);
+      return typeof s === 'string' && s.length > 800 ? s.slice(0, 800) + '…' : String(s);
+    }
+    const src = r as Record<string, unknown>;
+    // 剥掉回显类字段：命令模型自己知道，不必回灌
+    const { tool: _t, params: _p, durationMs: _d, ...rest } = src;
+    const slim: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(rest)) {
+      if (v === undefined) continue;
+      // data 里若还嵌着同样的回显（历史形态），一并剥掉
+      if (k === 'data' && v && typeof v === 'object' && !Array.isArray(v)) {
+        const { tool: _t2, params: _p2, ...d } = v as Record<string, unknown>;
+        slim[k] = d;
+      } else {
+        slim[k] = v;
+      }
+    }
+    const s = JSON.stringify(slim);
     return s.length > 800 ? s.slice(0, 800) + '…' : s;
   } catch {
     return '[result]';
@@ -717,6 +813,14 @@ function buildSystemPrompt(mode: TaskMode, toolNames: string[]): string {
 12. 证据纪律：一切结论以退出码、文件:行号、真实输出为准。禁止编造工具输出。
 13. 长会话纪律：不重复读取已读内容；重复读返回缓存引用。
 14. 工作区边界：write 只能写工作区内文件，写工作区外路径会被 sidecar 以 1001(PATH_ESCAPED) 硬拒。**禁止用 terminal 绕过这道边界**去写/改/删工作区外的文件——那是规避审查边界的变通，一旦需要就停下来向用户说明原因并请求指示，不要自作主张执行。确实需要落盘到工作区外时，请用户自行操作或明确授权。
+15. 工具调用顺序（严格遵守，违反会让用户看到的界面错乱）：
+    - 需要调用工具时，**只发起 tool_calls**，不要在同一条消息里写「已完成 / 我已经修好了 / 总结如下」这类结论。
+    - 工具结果会作为 tool 消息返回，你必须读取后再决定下一步。
+    - **只有不再需要任何工具时**，才输出最终回复；最终回复必须出现在最后一个 tool 结果**之后**。
+    - 禁止在 tool_calls **之前**输出最终回复；禁止把 tool_calls 与最终结论塞进同一条消息。若两者同时出现，系统只执行工具、丢弃那段文本。
+    - 多步操作就重复：assistant(tool_calls) → tool(result) → assistant(tool_calls) → tool(result) → … → assistant(final)。
+    - **每次发起 tool_calls 前，先在 content 里写一句极简摘要**（10 字以内，说明这一步做什么），例如「读取配置文件」「执行安装依赖」。这段摘要**不是最终回复**，只用于在界面上标注这一步的用途，会显示在工具名后面。
+    - **每次只调用一个工具**，让摘要与该工具一一对应。
 
 工具返回统一信封 {ok, data, error, truncated, cacheRef}。write 为唯一写通道：**path 与 edits 都是必填**，缺任一即失败。编辑用 oldText/newText 精确替换；新建文件必须 create=true（此时只用 newText 拼接内容，不要给 oldText）；修改已有文件必须 create=false 并传入 read 得到的 baselineHash。
 

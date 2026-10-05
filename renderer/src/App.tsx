@@ -7,6 +7,7 @@ import {
   activeKey,
   appendDeltaToLive,
   appendEntry,
+  appendProcessStep,
   attachCardToLive,
   finalizeLiveEntry,
   setChat,
@@ -69,7 +70,14 @@ export function App() {
       typeof sid === 'string' && sid.length > 0 ? sid : activeKey() || MAIN_KEY;
 
     const offChat = b.onChatEvent((payload) => {
-      const p = payload as { kind: string; text?: string; card?: never; usage?: never; sessionId?: string };
+      const p = payload as {
+        kind: string;
+        text?: string;
+        card?: never;
+        usage?: never;
+        ok?: boolean;
+        sessionId?: string;
+      };
       const key = keyOf(p.sessionId);
       if (p.kind === 'delta' && p.text) {
         setStreaming(key, true);
@@ -77,10 +85,16 @@ export function App() {
         appendDeltaToLive(key, p.text);
       } else if (p.kind === 'card' && p.card) {
         attachCardToLive(key, p.card);
+      } else if (p.kind === 'process') {
+        // 工具调用过程的步骤摘要（模型给的一句话）。它进折叠容器，
+        // 与最终回复分开渲染 —— 混在一起会让半截结论提前显示在工具卡之前。
+        setSessionRunning(key, true);
+        appendProcessStep(key, p.text ?? '');
       } else if (p.kind === 'done') {
         setStreaming(key, false);
         setSessionRunning(key, false);
-        finalizeLiveEntry(key, p.text || '');
+        // ok=false 是终止/错误说明：不当作最终回复收进正文，避免污染会话历史。
+        finalizeLiveEntry(key, p.text || '', undefined, p.ok !== false);
       }
     });
     // 预算/轮次挂起收尾。
